@@ -28,11 +28,14 @@ type EmbeddedClient struct {
 }
 
 func NewEmbeddedClient(baseURL string, token string) *EmbeddedClient {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	return &EmbeddedClient{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		token:   token,
 		httpClient: &http.Client{
-			Timeout: embeddedRuntimeRequestTimeout,
+			Transport: transport,
+			Timeout:   embeddedRuntimeRequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},

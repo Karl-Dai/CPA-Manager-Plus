@@ -15,6 +15,20 @@ import (
 
 const testRuntimeToken = "test-runtime-token"
 
+func TestNewEmbeddedClientDisablesEnvironmentProxy(t *testing.T) {
+	client := NewEmbeddedClient("http://cpamp-runtime:18318", testRuntimeToken)
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.httpClient.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("Transport.Proxy must be nil for direct Supervisor connections")
+	}
+	if transport == http.DefaultTransport {
+		t.Fatal("Transport reused http.DefaultTransport instead of cloning it")
+	}
+}
+
 func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 	tests := []struct {
 		name         string
