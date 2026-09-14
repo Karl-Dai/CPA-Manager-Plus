@@ -33,7 +33,7 @@ func fixture(t *testing.T, files map[string]string) string {
 	return filepath.Join(root, "apps/runtime-supervisor")
 }
 
-func TestBoundaryAllowsPrivateSQLiteJournal(t *testing.T) {
+func TestBoundaryAllowsPrivateSQLiteJournalAndRuntimeToken(t *testing.T) {
 	root := fixture(t, map[string]string{
 		"apps/runtime-supervisor/go.mod": "module " + supervisorModule + `
 
@@ -122,7 +122,7 @@ replace example.com/productconfig => ../manager-server
 	}
 }
 
-func TestBoundaryRejectsManagerStorageReferences(t *testing.T) {
+func TestBoundaryRejectsManagerStorageAndConfigReferences(t *testing.T) {
 	for _, literal := range []string{
 		`"usage.sqlite"`,
 		`"file:/data/usage.sqlite?mode=ro"`,
@@ -132,16 +132,26 @@ func TestBoundaryRejectsManagerStorageReferences(t *testing.T) {
 		`"\x75sage.sqlite"`,
 		`"USAGE_DB_PATH"`,
 		`"USAGE_DATA_DIR"`,
+		`"USAGE_COLLECTOR_MODE"`,
+		`"CPA_MANAGER_CONFIG"`,
+		`"CPA_MANAGER_ADMIN_KEY"`,
+		`"CPA_MANAGER_ADMIN_KEY_FILE"`,
 		`"CPA_MANAGER_DATA_KEY"`,
 		`"CPA_MANAGER_DATA_KEY_FILE"`,
 		`"CPA_MANAGER_DATA_KEY_PATH"`,
+		`"CPA_MANAGEMENT_KEY"`,
+		`"CPA_MANAGEMENT_KEY_FILE"`,
+		`"CPA_UPSTREAM_URL"`,
+		`"/run/secrets/cpa_management_key"`,
+		`"/run/secrets/cpa_admin_key"`,
+		`"/run/secrets/cpa_data_key"`,
 	} {
 		t.Run(literal, func(t *testing.T) {
 			root := fixture(t, map[string]string{
-				"apps/runtime-supervisor/storage.go": "package fixture\nconst storage = " + literal + "\n",
+				"apps/runtime-supervisor/reference.go": "package fixture\nconst reference = " + literal + "\n",
 			})
-			if err := checkBoundary(root); err == nil || !strings.Contains(err.Error(), "storage.go:2:") || !strings.Contains(err.Error(), "Manager-owned storage/config reference") {
-				t.Fatalf("checkBoundary() = %v, want Manager storage rejection with source position", err)
+			if err := checkBoundary(root); err == nil || !strings.Contains(err.Error(), "reference.go:2:") || !strings.Contains(err.Error(), "Manager-owned storage/config reference") {
+				t.Fatalf("checkBoundary() = %v, want Manager-owned reference rejection with source position", err)
 			}
 		})
 	}

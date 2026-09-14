@@ -79,8 +79,9 @@ func checkBoundary(root string) error {
 		}
 	}
 
-	// Check literal references to the Manager's concrete storage assets and
-	// configuration keys, including tests and files for other build platforms.
+	// Check literal references to the Manager's concrete storage assets,
+	// configuration keys, and secret paths, including tests and files for
+	// other build platforms.
 	// Go's scanner skips comments and decodes escaped/raw strings without AST
 	// analysis. Third-party vendored source is covered by the module check.
 	return filepath.WalkDir(root, func(name string, entry fs.DirEntry, walkErr error) error {
@@ -118,19 +119,23 @@ func checkBoundary(root string) error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", files.Position(pos), err)
 			}
-			if isManagerStorageReference(value) {
+			if isManagerOwnedReference(value) {
 				return fmt.Errorf("%s: Manager-owned storage/config reference %q", files.Position(pos), value)
 			}
 		}
 	})
 }
 
-func isManagerStorageReference(value string) bool {
+func isManagerOwnedReference(value string) bool {
 	if managerStoragePath.MatchString(value) {
 		return true
 	}
+	if strings.HasPrefix(value, "CPA_MANAGER_") || strings.HasPrefix(value, "USAGE_") {
+		return true
+	}
 	switch value {
-	case "USAGE_DB_PATH", "USAGE_DATA_DIR", "CPA_MANAGER_DATA_KEY", "CPA_MANAGER_DATA_KEY_FILE", "CPA_MANAGER_DATA_KEY_PATH":
+	case "CPA_MANAGEMENT_KEY", "CPA_MANAGEMENT_KEY_FILE", "CPA_UPSTREAM_URL",
+		"/run/secrets/cpa_management_key", "/run/secrets/cpa_admin_key", "/run/secrets/cpa_data_key":
 		return true
 	default:
 		return false
