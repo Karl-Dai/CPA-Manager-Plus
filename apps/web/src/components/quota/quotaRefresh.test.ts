@@ -289,4 +289,21 @@ describe('refreshQuotaWithConfig', () => {
       status: 'success',
     });
   });
+
+  it('exposes errorStatus on QuotaRefreshResult when fetchQuota rejects with status code', async () => {
+    const errorWithStatus = Object.assign(new Error('Rate limit exceeded'), { status: 429 });
+    vi.mocked(fetchCodexQuota).mockRejectedValueOnce(errorWithStatus);
+
+    const result = await runRefresh(
+      CODEX_CONFIG,
+      codexFile,
+      useQuotaStore.getState().setCodexQuota
+    );
+
+    expect(result).toMatchObject({
+      status: 'error',
+      error: 'Rate limit exceeded',
+      errorStatus: 429,
+    });
+  });
 });

@@ -20,6 +20,7 @@ export type QuotaRefreshResult<TState, TData> =
       data: null;
       state: TState;
       error: string;
+      errorStatus?: number;
     };
 
 export const refreshQuotaWithConfig = async <TState, TData>({
@@ -78,10 +79,11 @@ export const refreshQuotaWithConfig = async <TState, TData>({
   } catch (error: unknown) {
     if (!isCurrent() || !isSharedGenerationCurrent()) return null;
     const message = error instanceof Error ? error.message : t('common.unknown_error');
-    const status =
+    const rawStatus =
       typeof error === 'object' && error !== null && 'status' in error
         ? Number((error as { status?: unknown }).status)
         : undefined;
+    const errorStatus = Number.isFinite(rawStatus) ? rawStatus : undefined;
     let state: TState | undefined;
     const committed = commitIfRefreshCurrent(() => {
       setQuota((previous) => {
@@ -89,7 +91,7 @@ export const refreshQuotaWithConfig = async <TState, TData>({
         state = buildQuotaFailureState(
           config,
           message,
-          Number.isFinite(status) ? status : undefined,
+          errorStatus,
           file,
           previousState
         );
@@ -99,6 +101,8 @@ export const refreshQuotaWithConfig = async <TState, TData>({
         };
       });
     });
-    return committed && state ? { status: 'error', data: null, state, error: message } : null;
+    return committed && state
+      ? { status: 'error', data: null, state, error: message, errorStatus }
+      : null;
   }
 };

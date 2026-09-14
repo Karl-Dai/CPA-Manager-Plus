@@ -286,9 +286,11 @@ export function AccountQuotaTab({
 
       {shouldShowResetRecords ? (
         <section
+          id="quota-reset-records"
           className={styles.quotaSection}
           data-account-quota-evidence="true"
           data-account-quota-reset-records="true"
+          data-account-detail-anchor="reset-records"
         >
           <div className={styles.quotaResetCard} data-quota-evidence-panel="reset">
             <div className={styles.quotaResetHeader}>

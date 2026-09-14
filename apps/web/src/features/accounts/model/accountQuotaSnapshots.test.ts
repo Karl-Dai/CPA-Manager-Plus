@@ -2120,4 +2120,83 @@ describe('account quota snapshots', () => {
     expect(forward?.rateLimitResetCreditsAvailableCount).toBe(3);
     expect(reverse?.rateLimitResetCreditsAvailableCount).toBe(3);
   });
+
+  it('protects newer local reset-credit evidence from older snapshots', () => {
+    const quota = {
+      status: 'success' as const,
+      windows: [],
+      fetchedAtMs: 10_000,
+      resetCreditsEvidenceAtMs: 25_000,
+      rateLimitResetCreditsAvailableCount: 0,
+      rateLimitResetCredits: [],
+    };
+
+    const merged = mergeCodexResetCreditsFromQuotaSnapshots(quota, [
+      makeSnapshot({
+        observed_at_ms: 20_000,
+        reset_credits_available: 2,
+        reset_credits: [{ id: 'older-credit', expires_at_ms: 200_000 }],
+        field_sources: {
+          reset_credits_available: { source: 'api_query', observed_at_ms: 20_000 },
+          reset_credits: { source: 'api_query', observed_at_ms: 20_000 },
+        },
+      }),
+    ]);
+
+    expect(merged).toBe(quota);
+    expect(merged?.rateLimitResetCreditsAvailableCount).toBe(0);
+    expect(merged?.rateLimitResetCredits).toEqual([]);
+  });
+
+  it('allows newer snapshots to update reset credits when observed after local reset evidence', () => {
+    const quota = {
+      status: 'success' as const,
+      windows: [],
+      fetchedAtMs: 10_000,
+      resetCreditsEvidenceAtMs: 25_000,
+      rateLimitResetCreditsAvailableCount: 0,
+      rateLimitResetCredits: [],
+    };
+
+    const merged = mergeCodexResetCreditsFromQuotaSnapshots(quota, [
+      makeSnapshot({
+        observed_at_ms: 30_000,
+        reset_credits_available: 3,
+        reset_credits: [{ id: 'newer-credit', expires_at_ms: 300_000 }],
+        field_sources: {
+          reset_credits_available: { source: 'api_query', observed_at_ms: 30_000 },
+          reset_credits: { source: 'api_query', observed_at_ms: 30_000 },
+        },
+      }),
+    ]);
+
+    expect(merged?.rateLimitResetCreditsAvailableCount).toBe(3);
+    expect(merged?.rateLimitResetCredits).toHaveLength(1);
+    expect(merged?.resetCreditsEvidenceAtMs).toBe(30_000);
+  });
+
+  it('falls back to fetchedAtMs when resetCreditsEvidenceAtMs is absent', () => {
+    const quota = {
+      status: 'success' as const,
+      windows: [],
+      fetchedAtMs: 15_000,
+      rateLimitResetCreditsAvailableCount: null,
+      rateLimitResetCredits: [],
+    };
+
+    const merged = mergeCodexResetCreditsFromQuotaSnapshots(quota, [
+      makeSnapshot({
+        observed_at_ms: 20_000,
+        reset_credits_available: 1,
+        reset_credits: [{ id: 'snapshot-credit', expires_at_ms: 200_000 }],
+        field_sources: {
+          reset_credits_available: { source: 'api_query', observed_at_ms: 20_000 },
+          reset_credits: { source: 'api_query', observed_at_ms: 20_000 },
+        },
+      }),
+    ]);
+
+    expect(merged?.rateLimitResetCreditsAvailableCount).toBe(1);
+    expect(merged?.rateLimitResetCredits).toHaveLength(1);
+  });
 });

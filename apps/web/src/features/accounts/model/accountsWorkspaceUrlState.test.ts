@@ -180,4 +180,38 @@ describe('accountsWorkspaceUrlState', () => {
       readAccountsWorkspaceUrlState(search, DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE).statusFilter
     ).toBe('unconfirmed');
   });
+
+  it('reads layoutMode from search params and falls back safely on invalid values', () => {
+    expect(
+      readAccountsWorkspaceUrlState('?layout=grid', DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE).layoutMode
+    ).toBe('grid');
+    expect(
+      readAccountsWorkspaceUrlState('?layout=table', DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE).layoutMode
+    ).toBe('table');
+    expect(
+      readAccountsWorkspaceUrlState('?layout=invalid', DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE).layoutMode
+    ).toBe(DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE.layoutMode);
+  });
+
+  it('round-trips non-default layout mode through URL search', () => {
+    const search = writeAccountsWorkspaceUrlSearch(
+      '',
+      {
+        ...DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE,
+        view: 'accounts',
+        healthMode: 'local',
+        account: null,
+        detailTab: 'overview',
+        editor: null,
+        editorProvider: '',
+        layoutMode: 'grid',
+      },
+      DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE
+    );
+
+    expect(search).toBe('?layout=grid');
+    expect(
+      readAccountsWorkspaceUrlState(search, DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE).layoutMode
+    ).toBe('grid');
+  });
 });

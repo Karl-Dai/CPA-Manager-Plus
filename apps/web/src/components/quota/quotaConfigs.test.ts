@@ -59,6 +59,27 @@ describe('getCodexQuotaStoreKey', () => {
       });
     });
   });
+
+  it('populates resetCreditsEvidenceAtMs from fetched data in buildSuccessState', () => {
+    const successState = CODEX_CONFIG.buildSuccessState(
+      {
+        planType: 'plus',
+        windows: [],
+        observedAtMs: 1_000,
+        quotaInventoryObserved: true,
+        subscriptionActiveUntil: null,
+        rateLimitResetCreditsAvailableCount: 2,
+        rateLimitResetCredits: [],
+        rateLimitResetCreditsError: null,
+        resetCreditsEvidenceAtMs: 1_500,
+      },
+      { name: 'codex.json', type: 'codex', authIndex: 'auth-1' }
+    );
+
+    expect(successState.resetCreditsEvidenceAtMs).toBe(1_500);
+    expect(successState.rateLimitResetCreditsAvailableCount).toBe(2);
+    expect(successState.fetchedAtMs).toBe(1_000);
+  });
 });
 
 type TestQuotaState = {

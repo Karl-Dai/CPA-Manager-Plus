@@ -24,6 +24,7 @@ import {
   fetchAntigravityQuota,
   fetchClaudeQuota,
   fetchCodexQuota,
+  fetchCodexQuotaSummary,
   fetchKimiQuota,
   fetchXaiQuota,
   filterFreshCodexQuotaWindows,
@@ -691,6 +692,7 @@ export const CODEX_CONFIG: QuotaConfig<CodexQuotaState, CodexQuotaData> = {
     rateLimitResetCreditsAvailableCount: data.rateLimitResetCreditsAvailableCount,
     rateLimitResetCredits: data.rateLimitResetCredits,
     rateLimitResetCreditsError: data.rateLimitResetCreditsError,
+    resetCreditsEvidenceAtMs: data.resetCreditsEvidenceAtMs,
     ...buildQuotaCredentialIdentity(file),
     fetchedAtMs:
       readFiniteTimestamp(data.observedAtMs) ??
@@ -708,6 +710,11 @@ export const CODEX_CONFIG: QuotaConfig<CodexQuotaState, CodexQuotaData> = {
   buildFailureState: buildCodexQuotaFailureState,
   scopeState: scopeCredentialQuotaState,
   buildObservedState: buildObservedCodexQuotaState,
+};
+
+export const CODEX_SUMMARY_CONFIG: QuotaConfig<CodexQuotaState, CodexQuotaData> = {
+  ...CODEX_CONFIG,
+  fetchQuota: fetchCodexQuotaSummary,
 };
 
 export const KIMI_CONFIG: QuotaConfig<KimiQuotaState, KimiQuotaData> = {

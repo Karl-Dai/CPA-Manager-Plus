@@ -343,7 +343,7 @@ describe('accountRows', () => {
     },
     {
       label: 'xAI',
-      file: { name: 'xai.json', type: 'xai', authIndex: 'auth-1' },
+      file: { name: 'xai.json', type: 'xai', authIndex: 'auth-1', planType: 'SuperGrok' },
       stores: {
         ...emptyStores(),
         xaiQuota: {
@@ -1725,7 +1725,7 @@ describe('accountRows', () => {
   });
 
   it('keeps xAI account available while pay-as-you-go quota remains', () => {
-    const rows = buildAccountRows([{ name: 'xai.json', type: 'xai' }], {
+    const rows = buildAccountRows([{ name: 'xai.json', type: 'xai', planType: 'SuperGrok' }], {
       ...emptyStores(),
       xaiQuota: {
         'xai.json': {
@@ -1880,7 +1880,7 @@ describe('accountRows', () => {
   });
 
   it('uses xAI weekly credits when they are the tightest quota window', () => {
-    const rows = buildAccountRows([{ name: 'xai.json', type: 'xai' }], {
+    const rows = buildAccountRows([{ name: 'xai.json', type: 'xai', planType: 'SuperGrok' }], {
       ...emptyStores(),
       xaiQuota: {
         'xai.json': {
@@ -1910,7 +1910,7 @@ describe('accountRows', () => {
   });
 
   it('uses xAI product usage when period usage is not available', () => {
-    const rows = buildAccountRows([{ name: 'xai.json', type: 'xai' }], {
+    const rows = buildAccountRows([{ name: 'xai.json', type: 'xai', planType: 'SuperGrok' }], {
       ...emptyStores(),
       xaiQuota: {
         'xai.json': {
@@ -1937,6 +1937,36 @@ describe('accountRows', () => {
     expect(rows[0].quota.usedPercent).toBe(100);
     expect(rows[0].quota.resetLabel).toBe('2026-07-08T00:00:00Z');
     expect(rows[0].quota.status).toBe('exhausted');
+  });
+
+  it('does not expose xAI quota when planType is unknown even if monthly limit exists', () => {
+    const rows = buildAccountRows([{ name: 'xai-unknown.json', type: 'xai' }], {
+      ...emptyStores(),
+      xaiQuota: {
+        'xai-unknown.json': {
+          status: 'success',
+          billing: {
+            periodType: 'monthly',
+            usagePercent: null,
+            productUsage: [],
+            monthlyLimitCents: 10_000,
+            usedCents: 2_000,
+            includedUsedCents: 2_000,
+            onDemandCapCents: null,
+            onDemandUsedCents: null,
+            onDemandUsedPercent: null,
+            billingPeriodEnd: '2026-07-31T00:00:00Z',
+            usedPercent: 20,
+          },
+        },
+      },
+    });
+
+    expect(rows[0].quota).toMatchObject({
+      status: 'unknown',
+      remainingPercent: null,
+      usedPercent: null,
+    });
   });
 
   it('keeps cached Codex quota source while appending header diagnostics', () => {

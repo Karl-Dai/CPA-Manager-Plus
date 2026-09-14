@@ -5,7 +5,11 @@ import {
   buildAntigravityQuotaMatrix,
   formatHistorySuccessRate,
   formatMoney,
+  formatQuotaRemainingPercentDisplay,
+  formatQuotaRemainingPercentParts,
+  getQuotaRemainingPercentLabel,
   formatQuotaResetDisplay,
+  formatQuotaResetRelative,
   getQuotaResetRemainingDays,
   formatQuotaResetTimestamp,
   formatQuotaResetTooltipParams,
@@ -17,6 +21,8 @@ import {
   parsePriorityValue,
   quotaStatusLabelKey,
   selectAccountQuotaListWindows,
+  selectAccountQuotaMainListWindows,
+  getQuotaWindowReadableLabel,
 } from './accountsPagePresentation';
 import type { AccountRow } from './accountRows';
 import type { AccountQuotaDisplayWindow } from './accountQuotaDisplayWindows';
@@ -122,6 +128,50 @@ describe('accountsPagePresentation', () => {
     expect(getQuotaResetRemainingDays(nowMs + 10 * 24 * 60 * 60 * 1000 - 1, nowMs)).toBe(10);
     expect(getQuotaResetRemainingDays(nowMs - 1, nowMs)).toBe(0);
     expect(getQuotaResetRemainingDays(null, nowMs)).toBeNull();
+  });
+
+  it('formats relative quota resets with day, hour, and minute resolutions', () => {
+    const nowMs = new Date(2026, 8, 9, 10, 0, 0, 0).getTime();
+
+    // Default long format (zh-CN)
+    // 5 days later -> 5 天后
+    expect(formatQuotaResetRelative(nowMs + 5 * 24 * 60 * 60 * 1000, null, nowMs)).toBe('5 天后');
+    // 23 hours later -> 23 小时后
+    expect(formatQuotaResetRelative(nowMs + 23 * 60 * 60 * 1000 + 10 * 60 * 1000, null, nowMs)).toBe('23 小时后');
+    // 59 minutes later -> 59 分钟后
+    expect(formatQuotaResetRelative(nowMs + 59 * 60 * 1000 + 30 * 1000, null, nowMs)).toBe('59 分钟后');
+    // 30 seconds later -> <1 分钟后
+    expect(formatQuotaResetRelative(nowMs + 30 * 1000, null, nowMs)).toBe('<1 分钟后');
+    // Expired or exact zero -> empty string
+    expect(formatQuotaResetRelative(nowMs, null, nowMs)).toBe('');
+    expect(formatQuotaResetRelative(nowMs - 5000, null, nowMs)).toBe('');
+
+    // From string label fallback
+    expect(formatQuotaResetRelative(null, '5d', nowMs)).toBe('5 天后');
+    expect(formatQuotaResetRelative(null, '2h 18m', nowMs)).toBe('2 小时后');
+    expect(formatQuotaResetRelative(null, '2d 20h', nowMs)).toBe('2 天后');
+    expect(formatQuotaResetRelative(null, 'resets in 2d', nowMs)).toBe('2 天后');
+    expect(formatQuotaResetRelative(null, null, nowMs)).toBe('');
+    expect(formatQuotaResetRelative(null, '-', nowMs)).toBe('');
+
+    // Short style mode
+    expect(formatQuotaResetRelative(nowMs + 5 * 24 * 60 * 60 * 1000, null, nowMs, { style: 'short' })).toBe('5d');
+    expect(formatQuotaResetRelative(nowMs + 23 * 60 * 60 * 1000, null, nowMs, { style: 'short' })).toBe('23h');
+    expect(formatQuotaResetRelative(nowMs, null, nowMs, { style: 'short' })).toBe('');
+    expect(formatQuotaResetRelative(nowMs - 5000, null, nowMs, { style: 'short' })).toBe('');
+    expect(formatQuotaResetRelative(null, '5d', nowMs, { style: 'short' })).toBe('5d');
+
+    // Localization support: future <1m vs expired
+    expect(formatQuotaResetRelative(nowMs + 30 * 1000, null, nowMs, 'en')).toBe('in <1 min');
+    expect(formatQuotaResetRelative(nowMs, null, nowMs, 'en')).toBe('');
+    expect(formatQuotaResetRelative(nowMs - 5000, null, nowMs, 'en')).toBe('');
+
+    // Localization support
+    expect(formatQuotaResetRelative(nowMs + 5 * 24 * 60 * 60 * 1000, null, nowMs, 'en')).toBe('in 5 days');
+    expect(formatQuotaResetRelative(nowMs + 1 * 60 * 60 * 1000, null, nowMs, 'en')).toBe('in 1 hour');
+    expect(formatQuotaResetRelative(nowMs + 30 * 1000, null, nowMs, 'en')).toBe('in <1 min');
+    expect(formatQuotaResetRelative(nowMs + 5 * 24 * 60 * 60 * 1000, null, nowMs, 'zh-TW')).toBe('5 天後');
+    expect(formatQuotaResetRelative(nowMs + 2 * 60 * 60 * 1000, null, nowMs, 'zh-TW')).toBe('2 小時後');
   });
 
   it('keeps standard quota windows as the only list selection when available', () => {
@@ -387,5 +437,412 @@ describe('accountsPagePresentation', () => {
     expect(matrix?.windowKeys).toEqual(
       new Set(['five-claude', 'five-gemini', 'weekly-claude', 'weekly-gemini'])
     );
+  });
+
+  describe('selectAccountQuotaMainListWindows', () => {
+    const makeRow = (provider = 'codex') => makeAccountRow(provider);
+
+    it('selects 5h + weekly when 5h, weekly, and monthly are present (ascending duration)', () => {
+      const fiveHour = makeQuotaWindow({
+        key: '5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        remainingPercent: 10,
+      });
+      const weekly = makeQuotaWindow({
+        key: '7d',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+        remainingPercent: 80,
+      });
+      const monthly = makeQuotaWindow({
+        key: '30d',
+        kind: 'monthly',
+        limitWindowSeconds: 2592000,
+        remainingPercent: 5,
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('codex'), [
+        monthly,
+        fiveHour,
+        weekly,
+      ]);
+      expect(selected).toEqual([fiveHour, weekly]);
+    });
+
+    it('selects weekly + monthly when only weekly and monthly are present', () => {
+      const weekly = makeQuotaWindow({
+        key: '7d',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+      });
+      const monthly = makeQuotaWindow({
+        key: '30d',
+        kind: 'monthly',
+        limitWindowSeconds: 2592000,
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('codex'), [monthly, weekly]);
+      expect(selected).toEqual([weekly, monthly]);
+    });
+
+    it('selects 5h + monthly when only 5h and monthly are present', () => {
+      const fiveHour = makeQuotaWindow({
+        key: '5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+      });
+      const monthly = makeQuotaWindow({
+        key: '30d',
+        kind: 'monthly',
+        limitWindowSeconds: 2592000,
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('codex'), [monthly, fiveHour]);
+      expect(selected).toEqual([fiveHour, monthly]);
+    });
+
+    it('returns single window when only one window is available without stretching or padding', () => {
+      const fiveHour = makeQuotaWindow({
+        key: '5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('codex'), [fiveHour]);
+      expect(selected).toEqual([fiveHour]);
+    });
+
+    it('defaults main-list selection to maximum 2 windows', () => {
+      const w1 = makeQuotaWindow({
+        key: 'w1',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const w2 = makeQuotaWindow({
+        key: 'w2',
+        kind: 'daily',
+        limitWindowSeconds: 86400,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const w3 = makeQuotaWindow({
+        key: 'w3',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const w4 = makeQuotaWindow({
+        key: 'w4',
+        kind: 'monthly',
+        limitWindowSeconds: 2592000,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('claude'), [w4, w3, w2, w1]);
+      expect(selected).toHaveLength(2);
+      expect(selected).toEqual([w1, w2]);
+    });
+
+    it('supports an explicit maximum of 4 windows while preserving duration order', () => {
+      const fiveHour = makeQuotaWindow({
+        key: '5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        remainingPercent: 95,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const daily = makeQuotaWindow({
+        key: '24h',
+        kind: 'daily',
+        limitWindowSeconds: 86400,
+        remainingPercent: 5,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const weekly = makeQuotaWindow({
+        key: '7d',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+        remainingPercent: 80,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const monthly = makeQuotaWindow({
+        key: '30d',
+        kind: 'monthly',
+        limitWindowSeconds: 2592000,
+        remainingPercent: 10,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const longer = makeQuotaWindow({
+        key: '90d',
+        kind: 'monthly',
+        limitWindowSeconds: 7776000,
+        remainingPercent: 99,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+
+      const selected = selectAccountQuotaMainListWindows(
+        makeRow('claude'),
+        [longer, weekly, monthly, fiveHour, daily],
+        4
+      );
+
+      expect(selected).toHaveLength(4);
+      expect(selected).toEqual([fiveHour, daily, weekly, monthly]);
+    });
+
+    it('orders Antigravity windows by duration and stable model group rank', () => {
+      const claude5h = makeQuotaWindow({
+        key: 'claude-5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        source: 'antigravity',
+        windowMode: 'fixed',
+        groupLabel: 'Claude and GPT models',
+        modelScope: { kind: 'family', key: 'claude_gpt', complete: true },
+      });
+      const gemini5h = makeQuotaWindow({
+        key: 'gemini-5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        source: 'antigravity',
+        windowMode: 'fixed',
+        groupLabel: 'Gemini models',
+        modelScope: { kind: 'family', key: 'gemini', complete: true },
+      });
+      const claude7d = makeQuotaWindow({
+        key: 'claude-7d',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+        source: 'antigravity',
+        windowMode: 'fixed',
+        groupLabel: 'Claude and GPT models',
+        modelScope: { kind: 'family', key: 'claude_gpt', complete: true },
+      });
+      const gemini7d = makeQuotaWindow({
+        key: 'gemini-7d',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+        source: 'antigravity',
+        windowMode: 'fixed',
+        groupLabel: 'Gemini models',
+        modelScope: { kind: 'family', key: 'gemini', complete: true },
+      });
+
+      const selected = selectAccountQuotaMainListWindows(
+        makeRow('antigravity'),
+        [gemini7d, claude5h, claude7d, gemini5h],
+        4
+      );
+
+      expect(selected).toEqual([claude5h, gemini5h, claude7d, gemini7d]);
+    });
+
+    it('prioritizes known duration over unknown duration', () => {
+      const known = makeQuotaWindow({
+        key: 'known-weekly',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const unknown = makeQuotaWindow({
+        key: 'unknown-window',
+        kind: 'unknown',
+        limitWindowSeconds: null,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('claude'), [unknown, known]);
+      expect(selected).toEqual([known, unknown]);
+    });
+
+    it('maintains stable order when durations are identical', () => {
+      const first = makeQuotaWindow({
+        key: 'first-5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+      const second = makeQuotaWindow({
+        key: 'second-5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        windowMode: 'fixed',
+        source: 'claude',
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('claude'), [first, second]);
+      expect(selected).toEqual([first, second]);
+    });
+
+    it('does not sort by remaining percent', () => {
+      const lowPercentLongDuration = makeQuotaWindow({
+        key: 'weekly',
+        kind: 'weekly',
+        limitWindowSeconds: 604800,
+        remainingPercent: 5,
+        windowMode: 'fixed',
+        source: 'codex',
+      });
+      const highPercentShortDuration = makeQuotaWindow({
+        key: '5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        remainingPercent: 95,
+        windowMode: 'fixed',
+        source: 'codex',
+      });
+
+      // 5h must come first despite 95% > 5%
+      const selected = selectAccountQuotaMainListWindows(makeRow('codex'), [
+        lowPercentLongDuration,
+        highPercentShortDuration,
+      ]);
+      expect(selected).toEqual([highPercentShortDuration, lowPercentLongDuration]);
+    });
+
+    it('preserves provider-specific candidate eligibility (e.g. excludes scoped Codex windows)', () => {
+      const main5h = makeQuotaWindow({
+        key: 'main-5h',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        modelScope: { kind: 'family', key: 'codex_main', complete: true },
+        windowMode: 'fixed',
+        source: 'codex',
+      });
+      const sparkScoped = makeQuotaWindow({
+        key: 'spark',
+        kind: 'five_hour',
+        limitWindowSeconds: 18000,
+        modelScope: { kind: 'models', models: ['spark'], complete: true },
+        windowMode: 'fixed',
+        source: 'codex',
+      });
+
+      const selected = selectAccountQuotaMainListWindows(makeRow('codex'), [sparkScoped, main5h]);
+      expect(selected).toEqual([main5h]);
+    });
+  });
+
+  describe('getQuotaWindowReadableLabel', () => {
+    it('formats known window kinds with standard uppercase words in English', () => {
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'five_hour' }))).toBe('5h');
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'daily' }))).toBe('24h');
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'weekly' }))).toBe('Weekly');
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'monthly' }))).toBe('Monthly');
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'billing' }))).toBe('Billing');
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'payg' }))).toBe('Pay-As-You-Go');
+    });
+
+    it('preserves already localized labels for zh-CN without replacing them with English', () => {
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'weekly', label: '周额度' }))
+      ).toBe('周额度');
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'monthly', label: '月额度' }))
+      ).toBe('月额度');
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'billing', label: '月度积分' }))
+      ).toBe('月度积分');
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'payg', label: '按需用量' }))
+      ).toBe('按需用量');
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'weekly', label: '周积分' }))
+      ).toBe('周积分');
+    });
+
+    it('preserves already localized labels for ru without replacing them with English', () => {
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'weekly', label: 'Недельный лимит' }))
+      ).toBe('Недельный лимит');
+      expect(
+        getQuotaWindowReadableLabel(
+          makeQuotaWindow({ kind: 'billing', label: 'Ежемесячные кредиты' })
+        )
+      ).toBe('Ежемесячные кредиты');
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'payg', label: 'Оплата по факту' }))
+      ).toBe('Оплата по факту');
+    });
+
+    it('uses locale translation function t when window label is not already localized', () => {
+      const zhT = ((key: string) => {
+        if (key === 'accounts.detail_snapshot_window_weekly') return '周额度';
+        if (key === 'accounts.detail_snapshot_window_monthly') return '月额度';
+        if (key === 'accounts.col_quota') return '额度';
+        return key;
+      }) as unknown as TFunction;
+
+      const ruT = ((key: string) => {
+        if (key === 'accounts.detail_snapshot_window_weekly') return 'Недельная квота';
+        if (key === 'accounts.detail_snapshot_window_monthly') return 'Месячная квота';
+        if (key === 'accounts.col_quota') return 'Квота';
+        return key;
+      }) as unknown as TFunction;
+
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'weekly', label: '' }), zhT)).toBe(
+        '周额度'
+      );
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'monthly', label: '' }), zhT)
+      ).toBe('月额度');
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'weekly', label: '' }), ruT)).toBe(
+        'Недельная квота'
+      );
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ kind: 'monthly', label: '' }), ruT)
+      ).toBe('Месячная квота');
+      expect(
+        getQuotaWindowReadableLabel(makeQuotaWindow({ label: '7-day limit' }), zhT)
+      ).toBe('周额度');
+    });
+
+    it('formats custom/unknown labels with capitalized first letter', () => {
+      expect(getQuotaWindowReadableLabel(makeQuotaWindow({ label: 'custom limit' }))).toBe(
+        'Custom limit'
+      );
+    });
+  });
+
+  describe('formatQuotaRemainingPercentDisplay', () => {
+    it('formats remaining percent across all supported locales with Plan B unified prefix', () => {
+      expect(formatQuotaRemainingPercentDisplay('48%', 'zh-CN')).toBe('剩余 48%');
+      expect(formatQuotaRemainingPercentDisplay('48%', 'zh-TW')).toBe('剩餘 48%');
+      expect(formatQuotaRemainingPercentDisplay('48%', 'en')).toBe('Rem 48%');
+      expect(formatQuotaRemainingPercentDisplay('48%', 'ru')).toBe('Ост. 48%');
+    });
+
+    it('formats remaining percent parts for visual font-size separation', () => {
+      expect(formatQuotaRemainingPercentParts('48%', 'zh-CN')).toEqual({
+        prefix: '剩余',
+        percent: '48%',
+      });
+      expect(formatQuotaRemainingPercentParts('48%', 'en')).toEqual({
+        prefix: 'Rem',
+        percent: '48%',
+      });
+      expect(formatQuotaRemainingPercentParts('-', 'zh-CN')).toBeNull();
+      expect(formatQuotaRemainingPercentParts('', 'en')).toBeNull();
+      expect(getQuotaRemainingPercentLabel('en')).toBe('Rem');
+    });
+
+    it('handles fallback and invalid/dash percent values', () => {
+      expect(formatQuotaRemainingPercentDisplay('-', 'zh-CN')).toBe('-');
+      expect(formatQuotaRemainingPercentDisplay('', 'zh-CN')).toBe('-');
+      expect(formatQuotaRemainingPercentDisplay('80%')).toBe('剩余 80%');
+    });
   });
 });

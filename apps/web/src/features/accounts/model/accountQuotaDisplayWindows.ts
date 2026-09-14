@@ -22,7 +22,10 @@ import {
   isCodexMainQuotaModelScope,
 } from '@/utils/quota/codexQuota';
 import type { AccountRow } from './accountRows';
-import type { AccountQuotaStores } from './accountQuotaSummary';
+import {
+  hasConfirmedXaiBillingEntitlement,
+  type AccountQuotaStores,
+} from './accountQuotaSummary';
 
 export type AccountQuotaWindowKind =
   | 'five_hour'
@@ -643,7 +646,13 @@ const buildXaiQuotaDisplayWindows = (
 ): AccountQuotaDisplayWindow[] => {
   const quota = getCredentialScopedQuotaState(options.stores.xaiQuota, row.raw);
   const billing = quota?.billing;
-  if (!billing || billing.officialApiHealth) return [];
+  if (
+    !billing ||
+    billing.officialApiHealth ||
+    !hasConfirmedXaiBillingEntitlement(billing, row.planType)
+  ) {
+    return [];
+  }
 
   const resetLabel = billing.billingPeriodEnd
     ? formatDisplayResetTime(billing.billingPeriodEnd)
@@ -662,6 +671,12 @@ const buildXaiQuotaDisplayWindows = (
     typeof billing.usagePercent === 'number' && Number.isFinite(billing.usagePercent)
       ? clampDisplayPercent(billing.usagePercent)
       : null;
+
+  const monthlyUsedPercent =
+    typeof billing.usedPercent === 'number' && Number.isFinite(billing.usedPercent)
+      ? clampDisplayPercent(billing.usedPercent)
+      : null;
+  const hasLegacyMonthlyWindow = monthlyUsedPercent !== null || billing.monthlyLimitCents !== null;
 
   if (billing.periodType === 'weekly' || (billing.productUsage?.length ?? 0) > 0) {
     windows.push(
@@ -685,12 +700,7 @@ const buildXaiQuotaDisplayWindows = (
     );
   }
 
-  const monthlyUsedPercent =
-    typeof billing.usedPercent === 'number' && Number.isFinite(billing.usedPercent)
-      ? clampDisplayPercent(billing.usedPercent)
-      : null;
-
-  if (monthlyUsedPercent !== null || billing.monthlyLimitCents !== null) {
+  if (hasLegacyMonthlyWindow) {
     windows.push(
       buildAccountQuotaDisplayWindow({
         key: 'billing',

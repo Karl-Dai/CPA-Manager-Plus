@@ -222,6 +222,191 @@ export const formatQuotaResetDisplay = (
   return normalizedLabel;
 };
 
+const QUOTA_RESET_MINUTE_MS = 60 * 1000;
+const QUOTA_RESET_HOUR_MS = 60 * QUOTA_RESET_MINUTE_MS;
+
+export interface QuotaResetRelativeOptions {
+  locale?: string;
+  style?: 'long' | 'short';
+}
+
+const normalizeQuotaResetLocale = (locale?: string): 'zh-CN' | 'zh-TW' | 'en' | 'ru' => {
+  if (!locale) return 'zh-CN';
+  const lower = locale.toLowerCase();
+  if (lower.startsWith('zh-tw') || lower.startsWith('zh-hk') || lower.startsWith('zh-hant')) {
+    return 'zh-TW';
+  }
+  if (lower.startsWith('zh')) {
+    return 'zh-CN';
+  }
+  if (lower.startsWith('en')) {
+    return 'en';
+  }
+  if (lower.startsWith('ru')) {
+    return 'ru';
+  }
+  return 'zh-CN';
+};
+
+const formatRelativeUnit = (
+  count: number,
+  unit: 'd' | 'h' | 'm',
+  localeType: 'zh-CN' | 'zh-TW' | 'en' | 'ru'
+): string => {
+  if (localeType === 'zh-CN') {
+    if (unit === 'd') return `${count} 天后`;
+    if (unit === 'h') return `${count} 小时后`;
+    return `${count} 分钟后`;
+  }
+  if (localeType === 'zh-TW') {
+    if (unit === 'd') return `${count} 天後`;
+    if (unit === 'h') return `${count} 小時後`;
+    return `${count} 分鐘後`;
+  }
+  if (localeType === 'en') {
+    if (unit === 'd') return `in ${count} ${count === 1 ? 'day' : 'days'}`;
+    if (unit === 'h') return `in ${count} ${count === 1 ? 'hour' : 'hours'}`;
+    return `in ${count} ${count === 1 ? 'minute' : 'minutes'}`;
+  }
+  if (unit === 'd') return `через ${count} дн.`;
+  if (unit === 'h') return `через ${count} ч.`;
+  return `через ${count} мин.`;
+};
+
+const formatSubMinuteRelative = (localeType: 'zh-CN' | 'zh-TW' | 'en' | 'ru'): string => {
+  if (localeType === 'zh-CN') return '<1 分钟后';
+  if (localeType === 'zh-TW') return '<1 分鐘後';
+  if (localeType === 'en') return 'in <1 min';
+  return '< 1 мин.';
+};
+
+export function formatQuotaResetRelative(
+  resetAtMs: number | null | undefined,
+  resetLabel?: string | null,
+  nowMs?: number,
+  localeOrOptions?: string | QuotaResetRelativeOptions
+): string;
+export function formatQuotaResetRelative(
+  resetAtMs: number | null | undefined,
+  resetLabel?: string | null,
+  localeOrOptions?: string | QuotaResetRelativeOptions
+): string;
+export function formatQuotaResetRelative(
+  resetAtMs: number | null | undefined,
+  resetLabel?: string | null,
+  nowMsOrLocale?: number | string | QuotaResetRelativeOptions,
+  localeOrOptions?: string | QuotaResetRelativeOptions
+): string {
+  let nowMs = Date.now();
+  let resolvedLocaleOrOptions = localeOrOptions;
+
+  if (typeof nowMsOrLocale === 'number') {
+    nowMs = nowMsOrLocale;
+  } else if (nowMsOrLocale !== undefined) {
+    resolvedLocaleOrOptions = nowMsOrLocale;
+  }
+
+  let locale = 'zh-CN';
+  let style: 'long' | 'short' = 'long';
+  if (typeof resolvedLocaleOrOptions === 'string') {
+    locale = resolvedLocaleOrOptions;
+  } else if (resolvedLocaleOrOptions) {
+    if (resolvedLocaleOrOptions.locale) locale = resolvedLocaleOrOptions.locale;
+    if (resolvedLocaleOrOptions.style) style = resolvedLocaleOrOptions.style;
+  }
+
+  const localeType = normalizeQuotaResetLocale(locale);
+
+  let targetMs: number | null = null;
+  if (typeof resetAtMs === 'number' && Number.isFinite(resetAtMs) && resetAtMs > 0) {
+    targetMs = resetAtMs;
+  } else if (resetLabel) {
+    const parsed = parseQuotaResetLabelMs(resetLabel, nowMs);
+    if (parsed !== null) {
+      targetMs = parsed;
+    }
+  }
+
+  if (targetMs === null) {
+    const trimmed = resetLabel?.trim();
+    if (trimmed && trimmed !== '-') {
+      const match = trimmed.match(/(\d+)\s*([dhm])/i);
+      if (match) {
+        const count = Number.parseInt(match[1], 10);
+        const unit = match[2].toLowerCase() as 'd' | 'h' | 'm';
+        if (style === 'short') {
+          return `${count}${unit}`;
+        }
+        return formatRelativeUnit(count, unit, localeType);
+      }
+    }
+    return '';
+  }
+
+  const diffMs = targetMs - nowMs;
+  if (diffMs <= 0) {
+    return '';
+  }
+
+  if (diffMs >= QUOTA_RESET_DAY_MS) {
+    const days = Math.floor(diffMs / QUOTA_RESET_DAY_MS);
+    return style === 'short' ? `${days}d` : formatRelativeUnit(days, 'd', localeType);
+  }
+
+  if (diffMs >= QUOTA_RESET_HOUR_MS) {
+    const hours = Math.floor(diffMs / QUOTA_RESET_HOUR_MS);
+    return style === 'short' ? `${hours}h` : formatRelativeUnit(hours, 'h', localeType);
+  }
+
+  if (diffMs >= QUOTA_RESET_MINUTE_MS) {
+    const minutes = Math.floor(diffMs / QUOTA_RESET_MINUTE_MS);
+    return style === 'short' ? `${minutes}m` : formatRelativeUnit(minutes, 'm', localeType);
+  }
+
+  return style === 'short' ? '<1m' : formatSubMinuteRelative(localeType);
+}
+
+export interface QuotaRemainingPercentParts {
+  prefix: string;
+  percent: string;
+}
+
+export const getQuotaRemainingPercentLabel = (locale?: string): string => {
+  const localeType = normalizeQuotaResetLocale(locale);
+  switch (localeType) {
+    case 'zh-TW':
+      return '剩餘';
+    case 'en':
+      return 'Rem';
+    case 'ru':
+      return 'Ост.';
+    case 'zh-CN':
+    default:
+      return '剩余';
+  }
+};
+
+export const formatQuotaRemainingPercentParts = (
+  percentText: string,
+  locale?: string
+): QuotaRemainingPercentParts | null => {
+  if (!percentText || percentText === '-') return null;
+  return {
+    prefix: getQuotaRemainingPercentLabel(locale),
+    percent: percentText,
+  };
+};
+
+export const formatQuotaRemainingPercentDisplay = (
+  percentText: string,
+  locale?: string
+): string => {
+  const parts = formatQuotaRemainingPercentParts(percentText, locale);
+  if (!parts) return '-';
+  return `${parts.prefix} ${parts.percent}`;
+};
+
+
 export const formatQuotaResetTooltipParams = (
   params: Record<string, string | number>,
   resetAtMs: number | null | undefined,
@@ -373,6 +558,233 @@ const selectKimiQuotaListWindows = (
   return limits;
 };
 
+export const resolveWindowDurationSeconds = (
+  window: AccountQuotaDisplayWindow
+): number => {
+  if (
+    typeof window.limitWindowSeconds === 'number' &&
+    Number.isFinite(window.limitWindowSeconds) &&
+    window.limitWindowSeconds > 0
+  ) {
+    return window.limitWindowSeconds;
+  }
+  if (window.kind === 'five_hour') return 5 * 3600;
+  if (window.kind === 'daily') return 24 * 3600;
+  if (window.kind === 'weekly') return 7 * 86400;
+  if (window.kind === 'monthly' || window.kind === 'billing') return 30 * 86400;
+  return Number.MAX_SAFE_INTEGER;
+};
+
+const getAntigravityMatrixGroupDisplayLabel = (label: string) => {
+  const normalized = label.toLowerCase();
+  if (normalized.includes('claude') || normalized.includes('gpt')) return 'Claude';
+  if (normalized.includes('gemini')) return 'Gemini';
+  return label;
+};
+
+const resolveWeeklyQuotaLabel = (window: AccountQuotaDisplayWindow, t?: TFunction): string => {
+  const rawLabel = window.label?.trim();
+  if (rawLabel && rawLabel !== 'Quota window') {
+    const lower = rawLabel.toLowerCase();
+    const isEnglishWeekly =
+      lower.includes('weekly') ||
+      lower.includes('7 day') ||
+      lower.includes('7-day') ||
+      lower.includes('7d');
+    if (!isEnglishWeekly) {
+      return rawLabel;
+    }
+  }
+  if (t) {
+    const localized = t('accounts.detail_snapshot_window_weekly');
+    if (localized && !localized.toLowerCase().includes('weekly')) {
+      return localized;
+    }
+  }
+  return 'Weekly';
+};
+
+const resolveMonthlyQuotaLabel = (window: AccountQuotaDisplayWindow, t?: TFunction): string => {
+  const rawLabel = window.label?.trim();
+  if (rawLabel && rawLabel !== 'Quota window') {
+    const lower = rawLabel.toLowerCase();
+    const isEnglishMonthly =
+      lower.includes('monthly') ||
+      lower.includes('30 day') ||
+      lower.includes('30-day') ||
+      lower.includes('30d');
+    if (!isEnglishMonthly) {
+      return rawLabel;
+    }
+  }
+  if (t) {
+    const localized = t('accounts.detail_snapshot_window_monthly');
+    if (localized && !localized.toLowerCase().includes('monthly')) {
+      return localized;
+    }
+  }
+  return 'Monthly';
+};
+
+export const getQuotaWindowReadableLabel = (
+  window: AccountQuotaDisplayWindow,
+  t?: TFunction
+): string => {
+  let baseLabel: string;
+  switch (window.kind) {
+    case 'five_hour':
+      baseLabel = '5h';
+      break;
+    case 'daily':
+      baseLabel = '24h';
+      break;
+    case 'weekly':
+      baseLabel = resolveWeeklyQuotaLabel(window, t);
+      break;
+    case 'monthly':
+      baseLabel = resolveMonthlyQuotaLabel(window, t);
+      break;
+    case 'billing': {
+      const rawLabel = window.label?.trim();
+      if (rawLabel && rawLabel !== 'Quota window') {
+        baseLabel = rawLabel;
+      } else if (t) {
+        baseLabel = t('accounts.detail_snapshot_window_monthly');
+      } else {
+        baseLabel = 'Billing';
+      }
+      break;
+    }
+    case 'payg': {
+      const rawLabel = window.label?.trim();
+      if (rawLabel && rawLabel !== 'Quota window') {
+        baseLabel = rawLabel;
+      } else {
+        baseLabel = 'Pay-As-You-Go';
+      }
+      break;
+    }
+    case 'product':
+      baseLabel = window.label?.trim() || 'Product';
+      break;
+    case 'summary':
+      baseLabel = t ? t('accounts.col_quota') : (window.label?.trim() || 'Summary');
+      break;
+    default: {
+      const label = window.label?.trim() ?? '';
+      if (!label || label === 'Quota window') {
+        baseLabel = t ? t('accounts.col_quota') : 'Quota';
+      } else {
+        const lower = label.toLowerCase();
+        if (
+          lower.includes('5 hour') ||
+          lower.includes('5h') ||
+          lower.includes('5-hour') ||
+          lower.includes('five hour')
+        ) {
+          baseLabel = '5h';
+        } else if (lower.includes('24 hour') || lower.includes('24h') || lower.includes('daily')) {
+          baseLabel = '24h';
+        } else if (
+          lower.includes('weekly') ||
+          lower.includes('7 day') ||
+          lower.includes('7-day') ||
+          lower.includes('7d')
+        ) {
+          baseLabel = resolveWeeklyQuotaLabel(window, t);
+        } else if (
+          lower.includes('monthly') ||
+          lower.includes('30 day') ||
+          lower.includes('30-day') ||
+          lower.includes('30d')
+        ) {
+          baseLabel = resolveMonthlyQuotaLabel(window, t);
+        } else {
+          baseLabel = label.charAt(0).toUpperCase() + label.slice(1);
+        }
+      }
+      break;
+    }
+  }
+
+  if (window.source === 'antigravity' && window.groupLabel?.trim()) {
+    const scopeLabel = getAntigravityMatrixGroupDisplayLabel(window.groupLabel.trim());
+    if (scopeLabel && !baseLabel.toLowerCase().includes(scopeLabel.toLowerCase())) {
+      return `${scopeLabel} ${baseLabel}`;
+    }
+  }
+
+  return baseLabel;
+};
+
+export const selectAccountQuotaMainListWindows = (
+  row: AccountRow,
+  quotaWindows: AccountQuotaDisplayWindow[],
+  maxWindows = 2
+): AccountQuotaDisplayWindow[] => {
+  const standardQuotaWindows = quotaWindows.filter(isStandardAccountQuotaListWindow);
+  let candidates: AccountQuotaDisplayWindow[];
+
+  switch (row.provider) {
+    case 'codex':
+      candidates = selectCodexQuotaListWindows(quotaWindows);
+      break;
+    case 'kimi':
+      candidates = selectKimiQuotaListWindows(quotaWindows);
+      break;
+    case 'xai':
+      candidates =
+        standardQuotaWindows.length > 0
+          ? standardQuotaWindows
+          : selectXaiQuotaListFallbackWindows(quotaWindows);
+      break;
+    case 'antigravity':
+      candidates =
+        standardQuotaWindows.length > 0
+          ? standardQuotaWindows
+          : quotaWindows.filter(
+              (window) =>
+                window.windowMode !== 'non_window' &&
+                window.kind !== 'summary' &&
+                !isModelScopedAccountQuotaWindow(window)
+            );
+      if (candidates.length === 0) {
+        candidates = quotaWindows.filter((window) => window.windowMode !== 'non_window');
+      }
+      break;
+    case 'claude':
+    default:
+      candidates = standardQuotaWindows;
+      break;
+  }
+
+  const indexed = candidates.map((w, index) => ({
+    w,
+    index,
+    duration: resolveWindowDurationSeconds(w),
+  }));
+
+  indexed.sort((a, b) => {
+    if (a.duration !== b.duration) {
+      return a.duration - b.duration;
+    }
+    if (row.provider === 'antigravity') {
+      const groupRankDiff =
+        getAntigravityGroupRank(a.w.groupLabel ?? '') -
+        getAntigravityGroupRank(b.w.groupLabel ?? '');
+      if (groupRankDiff !== 0) {
+        return groupRankDiff;
+      }
+    }
+    if (a.index !== b.index) {
+      return a.index - b.index;
+    }
+    return a.w.key.localeCompare(b.w.key);
+  });
+
+  return indexed.slice(0, maxWindows).map((item) => item.w);
+};
+
 export const selectAccountQuotaListWindows = (
   row: AccountRow,
   quotaWindows: AccountQuotaDisplayWindow[],
@@ -405,12 +817,6 @@ const getAntigravityGroupRank = (label: string) => {
   return 2;
 };
 
-const getAntigravityMatrixGroupDisplayLabel = (label: string) => {
-  const normalized = label.toLowerCase();
-  if (normalized.includes('claude') || normalized.includes('gpt')) return 'Claude';
-  if (normalized.includes('gemini')) return 'Gemini';
-  return label;
-};
 
 export const getAccountQuotaFallbackVisibleScopeLabel = (
   row: AccountRow,

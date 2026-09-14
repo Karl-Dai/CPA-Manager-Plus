@@ -7,6 +7,8 @@ export const getDemoAuthFiles = () => ({ files: [] });
 export const requestDemoCredentialRefresh = (_selector: string) => false;
 export const advanceDemoCredentialRefresh = () => undefined;
 export const resetDemoCredentialRefresh = () => undefined;
+export const resetDemoEvidenceEpoch = () => undefined;
+export const getDemoEvidenceEpochMs = () => 0;
 export const getDemoPlugins = () => ({ plugins: [] });
 export const getDemoPluginStore = () => ({ sources: [], plugins: [] });
 export const getDemoManagerConfig = () => emptyObject;

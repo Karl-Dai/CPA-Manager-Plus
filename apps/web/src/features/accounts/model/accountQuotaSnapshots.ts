@@ -190,7 +190,14 @@ export const mergeCodexResetCreditsFromQuotaSnapshots = (
   quota: CodexQuotaState | undefined,
   snapshots: AccountQuotaSnapshotWindow[]
 ): CodexQuotaState | undefined => {
-  const localObservedAt = quota?.fetchedAtMs ?? quota?.observedAtMs ?? 0;
+  const hasLocalResetCreditsEvidence =
+    typeof quota?.resetCreditsEvidenceAtMs === 'number' &&
+    Number.isFinite(quota.resetCreditsEvidenceAtMs) &&
+    quota.resetCreditsEvidenceAtMs > 0;
+  const localResetCreditsEvidenceAtMs =
+    hasLocalResetCreditsEvidence && typeof quota?.resetCreditsEvidenceAtMs === 'number'
+      ? quota.resetCreditsEvidenceAtMs
+      : quota?.fetchedAtMs ?? quota?.observedAtMs ?? 0;
   const usableSnapshots = snapshots.filter(
     (snapshot) =>
       snapshot.stale !== true &&
@@ -216,11 +223,14 @@ export const mergeCodexResetCreditsFromQuotaSnapshots = (
     : 0;
   const useSnapshotCount =
     countSnapshot !== undefined &&
-    (quota?.rateLimitResetCreditsAvailableCount === undefined ||
-      countObservedAt >= localObservedAt);
+    (quota?.rateLimitResetCreditsAvailableCount === undefined && !hasLocalResetCreditsEvidence
+      ? true
+      : countObservedAt >= localResetCreditsEvidenceAtMs);
   const useSnapshotCredits =
     creditsSnapshot !== undefined &&
-    (quota?.rateLimitResetCredits === undefined || creditsObservedAt >= localObservedAt);
+    (quota?.rateLimitResetCredits === undefined && !hasLocalResetCreditsEvidence
+      ? true
+      : creditsObservedAt >= localResetCreditsEvidenceAtMs);
   if (!useSnapshotCount && !useSnapshotCredits) return quota;
 
   const clearCreditsFromNewZeroCount =
@@ -244,6 +254,11 @@ export const mergeCodexResetCreditsFromQuotaSnapshots = (
             expiresAt: new Date(credit.expires_at_ms).toISOString(),
           }))
         : base.rateLimitResetCredits,
+    resetCreditsEvidenceAtMs: Math.max(
+      localResetCreditsEvidenceAtMs,
+      useSnapshotCount ? countObservedAt : 0,
+      useSnapshotCredits ? creditsObservedAt : 0
+    ),
   };
   return next;
 };
