@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -9,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,8 +31,10 @@ type config struct {
 	token             string
 }
 
+type generationSource func() (uint64, error)
+
 func main() {
-	cfg, err := loadConfig(os.Getenv)
+	cfg, err := loadConfig(os.Getenv, randomRuntimeGeneration)
 	if err != nil {
 		log.Fatalf("configure runtime supervisor: %v", err)
 	}
@@ -42,7 +45,7 @@ func main() {
 	}
 }
 
-func loadConfig(getenv func(string) string) (config, error) {
+func loadConfig(getenv func(string) string, nextGeneration generationSource) (config, error) {
 	addr := strings.TrimSpace(getenv("CPAMP_RUNTIME_ADDR"))
 	if addr == "" {
 		addr = defaultRuntimeAddr
@@ -51,20 +54,20 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if identity == "" {
 		return config{}, errors.New("CPAMP_RUNTIME_IDENTITY is required")
 	}
-	generationText := strings.TrimSpace(getenv("CPAMP_RUNTIME_GENERATION"))
-	if generationText == "" {
-		return config{}, errors.New("CPAMP_RUNTIME_GENERATION is required")
-	}
-	generation, err := strconv.ParseUint(generationText, 10, 64)
-	if err != nil || generation == 0 {
-		return config{}, errors.New("CPAMP_RUNTIME_GENERATION must be a positive integer")
-	}
 	token := getenv("CPAMP_RUNTIME_TOKEN")
 	if strings.TrimSpace(token) == "" {
 		return config{}, errors.New("CPAMP_RUNTIME_TOKEN is required")
 	}
 	if strings.IndexFunc(token, unicode.IsSpace) >= 0 {
 		return config{}, errors.New("CPAMP_RUNTIME_TOKEN must not contain whitespace")
+	}
+	var generation uint64
+	for generation == 0 {
+		var err error
+		generation, err = nextGeneration()
+		if err != nil {
+			return config{}, fmt.Errorf("generate runtime generation: %w", err)
+		}
 	}
 	return config{
 		addr:              addr,
@@ -74,14 +77,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}, nil
 }
 
+func randomRuntimeGeneration() (uint64, error) {
+	var encoded [8]byte
+	if _, err := rand.Read(encoded[:]); err != nil {
+		return 0, fmt.Errorf("read secure random bytes: %w", err)
+	}
+	return binary.BigEndian.Uint64(encoded[:]), nil
+}
+
 func run(ctx context.Context, cfg config) error {
-	handler, err := protocol.NewHandler(protocol.Config{
-		RuntimeIdentity:   cfg.runtimeIdentity,
-		RuntimeGeneration: cfg.runtimeGeneration,
-		Token:             cfg.token,
-	})
+	handler, err := newRuntimeHandler(cfg)
 	if err != nil {
-		return fmt.Errorf("configure Runtime Protocol: %w", err)
+		return err
 	}
 	listener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
@@ -89,6 +96,18 @@ func run(ctx context.Context, cfg config) error {
 	}
 	log.Printf("cpamp-runtime-supervisor listening on %s", listener.Addr())
 	return serve(ctx, listener, handler)
+}
+
+func newRuntimeHandler(cfg config) (http.Handler, error) {
+	handler, err := protocol.NewHandler(protocol.Config{
+		RuntimeIdentity:   cfg.runtimeIdentity,
+		RuntimeGeneration: cfg.runtimeGeneration,
+		Token:             cfg.token,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configure Runtime Protocol: %w", err)
+	}
+	return handler, nil
 }
 
 func serve(ctx context.Context, listener net.Listener, handler http.Handler) error {
