@@ -78,13 +78,13 @@ The protocol MUST be authenticated per installation and MUST support explicit ti
 
 #### Runtime generation
 
-`RuntimeGeneration` is the **Supervisor execution authority epoch** for one Runtime Supervisor process incarnation. Runtime Supervisor owns the current generation. Manager only observes it through handshake/status, may cache it, and echoes it as a mutation precondition. Manager MUST NOT create, increment, or persist a generation as authority.
+Under the mutation-capable Runtime Protocol contract, `RuntimeGeneration` is the **Supervisor execution authority epoch** for one Runtime Supervisor process incarnation. Runtime Supervisor owns the current generation. Manager only observes it through handshake/status, may cache it, and echoes it as a mutation precondition. Manager MUST NOT create, increment, or persist a generation as authority.
 
-Before serving handshake/status, each Supervisor process incarnation establishes a new execution authority epoch and MUST freshly sample a cryptographically random, non-zero, opaque `uint64` generation. Phase 1 treats accidental numeric collision as negligible and does not introduce a durable generation registry or counter solely to prove uniqueness; an implementation MUST NOT intentionally reuse a known generation. Generation is compared for equality only; it has no ordering, monotonic-counter, business-version, desired-state-revision, database-generation, CPA PID, CPA-version, or CPA-restart-count semantics.
+The current read-only protocol slice MAY continue to obtain `RuntimeGeneration` from `CPAMP_RUNTIME_GENERATION` as bootstrap metadata. That configured value does not satisfy or enable mutation fencing, and no mutation endpoint may rely on it as execution authority.
 
-CPA stop, start, restart, crash recovery, or binary replacement does not by itself change generation while the same Supervisor process remains the execution authority. After Supervisor restart, Manager MUST observe handshake/status again before submitting another mutation instead of intentionally reusing its cached pre-restart generation. Under Phase 1's random-epoch model, the freshly sampled value makes that cached value stale except for the accepted negligible collision probability.
+Before the first mutation endpoint is enabled, Supervisor startup MUST replace that bootstrap mechanism. A mutation-capable Supervisor MUST establish a new execution authority epoch and freshly sample a cryptographically random, non-zero, opaque `uint64` generation for each process incarnation before serving handshake/status or accepting mutations. Phase 1 treats accidental numeric collision as negligible and does not introduce a durable generation registry or counter solely to prove uniqueness; an implementation MUST NOT intentionally reuse a known generation. Generation is compared for equality only; it has no ordering, monotonic-counter, business-version, desired-state-revision, database-generation, CPA PID, CPA-version, or CPA-restart-count semantics.
 
-The existing `CPAMP_RUNTIME_GENERATION` environment variable is a bootstrap mechanism for the read-only protocol slice. A static configured value is not an acceptable generation source for the first mutation endpoint because it may survive a service/container restart and fail to fence requests from the previous Supervisor incarnation. Replacing that bootstrap mechanism is a separate implementation slice.
+Once mutation capability is enabled, CPA stop, start, restart, crash recovery, or binary replacement does not by itself change generation while the same Supervisor process remains the execution authority. After Supervisor restart, Manager MUST observe handshake/status again before submitting another mutation instead of intentionally reusing its cached pre-restart generation. Under Phase 1's random-epoch model, the freshly sampled value makes that cached value stale except for the accepted negligible collision probability.
 
 #### Mutation operation envelope and fencing
 
@@ -105,6 +105,8 @@ Across all retained generations for the same Runtime identity:
 - A previously unseen operation ID with valid current Runtime identity/generation is durably recorded before any side effect.
 - Replaying an existing operation ID with the same logical typed request returns its existing operation/result state, including the generation in which it was created, and MUST NOT execute the side effect twice.
 - Reusing an existing operation ID for a different operation type or typed payload fails with `operation_id_conflict`.
+
+For the lifetime of a Runtime identity, an operation ID is not reusable. Retention or compaction MUST NOT make a recorded operation ID appear previously unseen. Detailed result data may be discarded only if a durable tombstone preserves enough request-identity and outcome metadata to maintain replay behavior, idempotency, and conflict detection.
 
 Mutation submission order is fixed:
 
@@ -295,6 +297,6 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 5. Embedded and External share the same application-level RuntimeClient contract.
 6. Privileged runtime side effects require durable operation intent first.
 7. Docker Phase 1 keeps the Manager and Runtime containers as separate deployment failure domains; Supervisor and CPA keep distinct roles, ownership, state, and authority within the shared Runtime container failure domain.
-8. Each Runtime Supervisor process incarnation establishes a new authority epoch by freshly sampling an opaque random generation; Manager only observes and echoes it.
+8. Before mutation capability is enabled, each Runtime Supervisor process incarnation must establish a new authority epoch by freshly sampling an opaque random generation; Manager only observes and echoes it.
 9. Mutations fence both Runtime identity and generation before idempotency resolution, durable intent, or side effects.
 10. For one Runtime identity, durable operation ID idempotency spans Supervisor generations: replaying the same logical request never executes its side effect twice, and conflicting reuse fails closed.
