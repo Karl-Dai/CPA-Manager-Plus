@@ -9,7 +9,10 @@ import (
 )
 
 // RuntimeClient reports observed Runtime state without exposing an adapter or
-// transport to application code.
+// transport to application code. Status returns an error when the adapter
+// cannot obtain reliable observed state. RuntimeStateOffline is reserved for
+// authoritative observation that CPA is unavailable; transport and
+// authentication failures are errors.
 type RuntimeClient interface {
 	Status(ctx context.Context) (model.RuntimeObservedStatus, error)
 }
