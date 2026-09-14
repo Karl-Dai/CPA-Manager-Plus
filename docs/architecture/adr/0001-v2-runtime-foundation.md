@@ -143,6 +143,15 @@ cpamp-runtime container
 
 Manager data and Runtime data use separate storage ownership. Runtime Supervisor does not require Docker socket access to manage CPA.
 
+Docker Phase 1 has two deployment/container failure domains:
+
+1. `cpamp-manager` container.
+2. `cpamp-runtime` container.
+
+Within `cpamp-runtime`, Runtime Supervisor and CPA remain separate processes with distinct roles, ownership, state, and authority, but they share the Runtime container failure domain. Phase 1 does not guarantee that the CPA child survives Runtime Supervisor PID 1 exit or Runtime container crash, stop, or kill.
+
+Phase 1 does not introduce a third CPA container, Docker socket orchestration, or another sidecar/controller to manufacture an additional deployment failure domain.
+
 #### Native Linux
 
 ```text
@@ -169,14 +178,25 @@ Windows Service: CPAMP Runtime Supervisor
 
 Full Docker Embedded is the Phase 1 delivery target. Full Native Embedded follows after Runtime Foundation is stable and is not a Phase 1 start blocker.
 
+Future Native topology may provide different OS/service failure and survival semantics. Docker Phase 1 does not depend on those semantics.
+
 ### 9. Failure-domain requirements
 
-The architecture MUST preserve these behaviors:
+The architecture distinguishes application behavior invariants from deployment survival guarantees.
 
-- Manager failure MUST NOT terminate a healthy CPA gateway.
-- Supervisor failure MUST NOT intentionally terminate an already healthy CPA gateway.
-- CPA failure MUST NOT make Manager Console/API unavailable.
+Application behavior invariants:
+
+- Manager crash, restart, or temporary unavailability MUST NOT cause the control path to intentionally terminate a healthy CPA gateway. While the Runtime container remains healthy, model traffic continues directly through `AI Client -> CPA -> Provider` without traversing Manager.
+- CPA child crash, exit, or readiness failure MUST NOT make Manager Console/API unavailable. Manager MUST be able to eventually observe and report the CPA runtime condition; the concrete lifecycle states are defined by later lifecycle work.
+- Runtime Supervisor MUST NOT intentionally terminate a healthy CPA merely because Manager disconnects, a status request fails, ordinary reconciliation fails, or the control path has a transient failure.
 - Manager health MUST be independently observable from CPA runtime health.
+
+Deployment survival guarantee:
+
+- Manager container failure MUST NOT stop an otherwise healthy Runtime container. Docker Phase 1 treats Manager and Runtime as separate deployment/container failure domains; this does not claim independence from a shared host or container-engine failure.
+- Docker Phase 1 does not guarantee CPA child survival after Runtime Supervisor PID 1 exits or the Runtime container crashes, stops, or is killed. Supervisor and CPA share that deployment failure domain.
+
+Logical ownership, security/authority, state ownership, process role, and deployment failure domain are separate architectural dimensions. Sharing the Runtime container failure domain does not merge ownership: Runtime Supervisor remains the Execution Plane, and CPA remains the Data Plane.
 
 ### 10. Update ownership
 
@@ -225,4 +245,4 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 4. Manager may access CPA Management API directly; Supervisor is lifecycle execution, not a management proxy.
 5. Embedded and External share the same application-level RuntimeClient contract.
 6. Privileged runtime side effects require durable operation intent first.
-7. Manager, Supervisor, and CPA remain separate failure domains.
+7. Docker Phase 1 keeps the Manager and Runtime containers as separate deployment failure domains; Supervisor and CPA keep distinct roles, ownership, state, and authority within the shared Runtime container failure domain.
