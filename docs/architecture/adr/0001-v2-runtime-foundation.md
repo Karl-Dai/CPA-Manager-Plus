@@ -80,9 +80,9 @@ The protocol MUST be authenticated per installation and MUST support explicit ti
 
 `RuntimeGeneration` is the **Supervisor execution authority epoch** for one Runtime Supervisor process incarnation. Runtime Supervisor owns the current generation. Manager only observes it through handshake/status, may cache it, and echoes it as a mutation precondition. Manager MUST NOT create, increment, or persist a generation as authority.
 
-Before serving handshake/status, each Supervisor process incarnation MUST generate a new cryptographically random, non-zero, opaque `uint64` generation. A new incarnation, including one created by Runtime container restart, MUST use a generation different from the previous incarnation. Generation is compared for equality only; it has no ordering, monotonic-counter, business-version, desired-state-revision, database-generation, CPA PID, CPA-version, or CPA-restart-count semantics.
+Before serving handshake/status, each Supervisor process incarnation establishes a new execution authority epoch and MUST freshly sample a cryptographically random, non-zero, opaque `uint64` generation. Phase 1 treats accidental numeric collision as negligible and does not introduce a durable generation registry or counter solely to prove uniqueness; an implementation MUST NOT intentionally reuse a known generation. Generation is compared for equality only; it has no ordering, monotonic-counter, business-version, desired-state-revision, database-generation, CPA PID, CPA-version, or CPA-restart-count semantics.
 
-CPA stop, start, restart, crash recovery, or binary replacement does not by itself change generation while the same Supervisor process remains the execution authority. After Supervisor restart, Manager's cached generation is stale, and Manager MUST observe handshake/status again before submitting another mutation.
+CPA stop, start, restart, crash recovery, or binary replacement does not by itself change generation while the same Supervisor process remains the execution authority. After Supervisor restart, Manager MUST observe handshake/status again before submitting another mutation instead of intentionally reusing its cached pre-restart generation. Under Phase 1's random-epoch model, the freshly sampled value makes that cached value stale except for the accepted negligible collision probability.
 
 The existing `CPAMP_RUNTIME_GENERATION` environment variable is a bootstrap mechanism for the read-only protocol slice. A static configured value is not an acceptable generation source for the first mutation endpoint because it may survive a service/container restart and fail to fence requests from the previous Supervisor incarnation. Replacing that bootstrap mechanism is a separate implementation slice.
 
@@ -96,11 +96,15 @@ Every future mutation request MUST combine common mutation metadata with a typed
 
 Mutation requests MUST use operation-specific typed payloads. An open-ended `action` plus arbitrary `params` map is not part of Runtime Protocol v1.
 
-Supervisor treats `(current RuntimeGeneration, operationId)` as the idempotency key. Within one generation:
+Supervisor's durable idempotency namespace is `(RuntimeIdentity, operationId)`. If a private journal is permanently scoped to one immutable Runtime identity, `operationId` alone may be its physical key, but the protocol semantics are the same. `RuntimeGeneration` records the execution authority epoch in which an operation was created; it MUST NOT partition or reset the durable idempotency namespace.
 
-- A new operation ID with valid Runtime identity/generation is durably recorded before any side effect.
-- Replaying the same operation ID with the same logical typed request returns the existing operation/result state and MUST NOT execute the side effect twice.
-- Reusing the same operation ID for a different operation type or typed payload fails with `operation_id_conflict`.
+For idempotency comparison, the logical request consists of the operation type and its typed payload. `expectedRuntimeIdentity` selects the Runtime namespace, while `expectedRuntimeGeneration` is a freshness precondition for the current submission; changing only that expected generation after re-observation does not make the logical request different.
+
+Across all retained generations for the same Runtime identity:
+
+- A previously unseen operation ID with valid current Runtime identity/generation is durably recorded before any side effect.
+- Replaying an existing operation ID with the same logical typed request returns its existing operation/result state, including the generation in which it was created, and MUST NOT execute the side effect twice.
+- Reusing an existing operation ID for a different operation type or typed payload fails with `operation_id_conflict`.
 
 Mutation submission order is fixed:
 
@@ -108,13 +112,14 @@ Mutation submission order is fixed:
 2. Decode and perform basic request validation.
 3. Compare `expectedRuntimeIdentity` with the current identity.
 4. Compare `expectedRuntimeGeneration` with the current generation.
-5. Resolve operation ID/idempotency.
-6. Durably record intent.
-7. Perform the side effect.
+5. Resolve operation ID against the durable cross-generation idempotency namespace.
+6. Evaluate operation-specific preconditions for a new operation.
+7. Durably record intent for a new operation.
+8. Perform the side effect.
 
-An identity mismatch fails with `runtime_identity_mismatch`; a generation mismatch fails with `stale_runtime_generation`. Both checks happen before idempotency lookup, durable intent, and side effects. Consequently, replaying a previous-generation mutation after Supervisor restart is rejected as stale instead of resuming or re-executing it. A future, separate operation-observation API is responsible for querying the status of an older operation.
+An identity mismatch fails with `runtime_identity_mismatch`; a generation mismatch fails with `stale_runtime_generation`. Both checks happen before idempotency lookup, durable intent, and side effects. Consequently, replaying a request that still carries a previous generation is rejected as stale. After Manager observes the current generation and retries the same logical request with the same operation ID, the durable lookup finds the earlier-generation record: an identical request returns the existing state, while a different request fails with `operation_id_conflict`. A generation change alone MUST NOT create or execute the operation again. A future, separate operation-observation API is responsible for querying operation status without resubmitting a mutation.
 
-Runtime Protocol v1 keeps the existing JSON error envelope with a stable code and message. Mutation application errors and their HTTP status are:
+Runtime Protocol v1 keeps the existing JSON error envelope with a stable code and a human-readable message. The code is the protocol contract; clients MUST NOT branch on or otherwise depend on message wording. Mutation application errors and their HTTP status are:
 
 | HTTP status | Error code | Meaning |
 |---|---|---|
@@ -122,14 +127,14 @@ Runtime Protocol v1 keeps the existing JSON error envelope with a stable code an
 | `400` | `unsupported_operation` | The typed operation is not supported by this Runtime. |
 | `409` | `runtime_identity_mismatch` | The request targets a different Runtime identity. |
 | `409` | `stale_runtime_generation` | The request targets a different Supervisor authority epoch. |
-| `409` | `operation_id_conflict` | The operation ID already names a different logical request in this generation. |
+| `409` | `operation_id_conflict` | The operation ID already names a different logical request for this Runtime identity. |
 | `409` | `operation_state_conflict` | The typed operation is incompatible with the current operation/runtime state. |
 | `503` | `operation_persistence_unavailable` | Durable operation state cannot be committed, so no side effect is performed. |
 | `500` | `internal_error` | An unexpected internal failure occurred. |
 
 HTTP authentication failure remains the existing `401` protocol behavior and does not introduce a parallel domain authentication error system. Future typed operations may define additional stable application codes without changing this common envelope.
 
-A mutation result contains at least `operationId`, `operationType`, `runtimeIdentity`, `runtimeGeneration`, `state`, and an optional structured reason/error with a stable code and message. The initial state vocabulary is `accepted`, `running`, `succeeded`, and `failed`. This contract does not introduce progress percentages, streaming, queues, or a workflow engine.
+A mutation result contains at least `operationId`, `operationType`, `runtimeIdentity`, `runtimeGeneration`, `state`, and an optional structured reason/error with a stable code and a human-readable message. Message text is not a stable API field. The initial state vocabulary is `accepted`, `running`, `succeeded`, and `failed`. This contract does not introduce progress percentages, streaming, queues, or a workflow engine.
 
 Unix Domain Sockets and Windows Named Pipes are deferred. They may later be introduced as transport adapters without changing protocol semantics.
 
@@ -145,7 +150,7 @@ Privileged mutations obey:
 
 If an operation cannot be durably recorded, Supervisor MUST NOT perform binary replacement, process switching, rollback mutation, or other privileged filesystem side effects.
 
-The initial journal needs only operation-oriented fields such as operation ID, type, Runtime identity/generation, enough typed-request data to detect conflicting operation ID reuse, expected/current target version, state, timestamps, rollback reference, and structured error code. Records created under an earlier generation MUST NOT be deleted merely because Supervisor starts with a new generation; recovery and observation of those records are later tasks.
+The initial journal needs only operation-oriented fields such as operation ID, type, Runtime identity, creation generation, enough typed-request data to detect conflicting operation ID reuse, expected/current target version, state, timestamps, rollback reference, and structured error code. Records created under an earlier generation MUST NOT be deleted or excluded from idempotency lookup merely because Supervisor starts with a new generation; recovery and observation of those records are later tasks.
 
 ### 6. Secret ownership
 
@@ -290,6 +295,6 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 5. Embedded and External share the same application-level RuntimeClient contract.
 6. Privileged runtime side effects require durable operation intent first.
 7. Docker Phase 1 keeps the Manager and Runtime containers as separate deployment failure domains; Supervisor and CPA keep distinct roles, ownership, state, and authority within the shared Runtime container failure domain.
-8. Runtime Supervisor owns a new opaque generation for each process incarnation; Manager only observes and echoes it.
+8. Each Runtime Supervisor process incarnation establishes a new authority epoch by freshly sampling an opaque random generation; Manager only observes and echoes it.
 9. Mutations fence both Runtime identity and generation before idempotency resolution, durable intent, or side effects.
-10. Within one generation, replaying the same operation ID and logical request never executes its side effect twice; conflicting reuse fails closed.
+10. For one Runtime identity, durable operation ID idempotency spans Supervisor generations: replaying the same logical request never executes its side effect twice, and conflicting reuse fails closed.
