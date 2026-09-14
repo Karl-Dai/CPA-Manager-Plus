@@ -81,11 +81,17 @@ type RuntimeObservedStatus struct {
 }
 
 func (s RuntimeObservedStatus) Validate() error {
-	if strings.TrimSpace(string(s.Identity)) == "" {
-		return errors.New("runtime identity is required")
-	}
-	if s.Generation == 0 {
-		return errors.New("runtime generation is required")
+	hasProtocol := strings.TrimSpace(string(s.ProtocolVersion)) != ""
+	hasIdentity := strings.TrimSpace(string(s.Identity)) != ""
+	if hasProtocol {
+		if !hasIdentity {
+			return errors.New("runtime identity is required when Runtime Protocol is present")
+		}
+		if s.Generation == 0 {
+			return errors.New("runtime generation is required when Runtime Protocol is present")
+		}
+	} else if hasIdentity || s.Generation != 0 {
+		return errors.New("runtime identity and generation require Runtime Protocol")
 	}
 	if !s.State.IsValid() {
 		return fmt.Errorf("invalid runtime state %q", s.State)

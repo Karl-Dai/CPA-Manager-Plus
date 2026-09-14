@@ -55,10 +55,12 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 	if err := starting.Validate(); err != nil {
 		t.Fatalf("starting status without CPA version: %v", err)
 	}
-	withoutProtocol := valid
-	withoutProtocol.ProtocolVersion = ""
-	if err := withoutProtocol.Validate(); err != nil {
-		t.Fatalf("status without a Runtime Protocol endpoint: %v", err)
+	external := valid
+	external.ProtocolVersion = ""
+	external.Identity = ""
+	external.Generation = 0
+	if err := external.Validate(); err != nil {
+		t.Fatalf("external status without Runtime Protocol metadata: %v", err)
 	}
 
 	tests := map[string]func(*RuntimeObservedStatus){
@@ -73,6 +75,14 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 		},
 		"ready without CPA version": func(status *RuntimeObservedStatus) {
 			status.CPAObservedVersion = ""
+		},
+		"identity without protocol": func(status *RuntimeObservedStatus) {
+			status.ProtocolVersion = ""
+			status.Generation = 0
+		},
+		"generation without protocol": func(status *RuntimeObservedStatus) {
+			status.ProtocolVersion = ""
+			status.Identity = ""
 		},
 		"empty capability": func(status *RuntimeObservedStatus) {
 			status.Capabilities = RuntimeCapabilities{"status", " "}
