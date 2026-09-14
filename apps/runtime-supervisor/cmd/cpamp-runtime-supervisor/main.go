@@ -1,0 +1,141 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+	"unicode"
+
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
+)
+
+const (
+	defaultRuntimeAddr = "127.0.0.1:18318"
+	shutdownTimeout    = 10 * time.Second
+)
+
+type config struct {
+	addr              string
+	runtimeIdentity   string
+	runtimeGeneration uint64
+	token             string
+}
+
+func main() {
+	cfg, err := loadConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("configure runtime supervisor: %v", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, cfg); err != nil {
+		log.Fatalf("runtime supervisor: %v", err)
+	}
+}
+
+func loadConfig(getenv func(string) string) (config, error) {
+	addr := strings.TrimSpace(getenv("CPAMP_RUNTIME_ADDR"))
+	if addr == "" {
+		addr = defaultRuntimeAddr
+	}
+	identity := strings.TrimSpace(getenv("CPAMP_RUNTIME_IDENTITY"))
+	if identity == "" {
+		return config{}, errors.New("CPAMP_RUNTIME_IDENTITY is required")
+	}
+	generationText := strings.TrimSpace(getenv("CPAMP_RUNTIME_GENERATION"))
+	if generationText == "" {
+		return config{}, errors.New("CPAMP_RUNTIME_GENERATION is required")
+	}
+	generation, err := strconv.ParseUint(generationText, 10, 64)
+	if err != nil || generation == 0 {
+		return config{}, errors.New("CPAMP_RUNTIME_GENERATION must be a positive integer")
+	}
+	token := getenv("CPAMP_RUNTIME_TOKEN")
+	if strings.TrimSpace(token) == "" {
+		return config{}, errors.New("CPAMP_RUNTIME_TOKEN is required")
+	}
+	if strings.IndexFunc(token, unicode.IsSpace) >= 0 {
+		return config{}, errors.New("CPAMP_RUNTIME_TOKEN must not contain whitespace")
+	}
+	return config{
+		addr:              addr,
+		runtimeIdentity:   identity,
+		runtimeGeneration: generation,
+		token:             token,
+	}, nil
+}
+
+func run(ctx context.Context, cfg config) error {
+	handler, err := protocol.NewHandler(protocol.Config{
+		RuntimeIdentity:   cfg.runtimeIdentity,
+		RuntimeGeneration: cfg.runtimeGeneration,
+		Token:             cfg.token,
+	})
+	if err != nil {
+		return fmt.Errorf("configure Runtime Protocol: %w", err)
+	}
+	listener, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.addr, err)
+	}
+	log.Printf("cpamp-runtime-supervisor listening on %s", listener.Addr())
+	return serve(ctx, listener, handler)
+}
+
+func serve(ctx context.Context, listener net.Listener, handler http.Handler) error {
+	return serveWithShutdownTimeout(ctx, listener, handler, shutdownTimeout)
+}
+
+func serveWithShutdownTimeout(ctx context.Context, listener net.Listener, handler http.Handler, timeout time.Duration) error {
+	server := newHTTPServer(handler)
+	serveResult := make(chan error, 1)
+	go func() {
+		err := server.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serveResult <- err
+	}()
+
+	select {
+	case err := <-serveResult:
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	shutdownErr := server.Shutdown(shutdownCtx)
+	var closeErr error
+	if shutdownErr != nil {
+		closeErr = server.Close()
+		if errors.Is(closeErr, http.ErrServerClosed) {
+			closeErr = nil
+		}
+	}
+	serveErr := <-serveResult
+	if shutdownErr != nil || closeErr != nil || serveErr != nil {
+		return errors.Join(shutdownErr, closeErr, serveErr)
+	}
+	return nil
+}
+
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+}
