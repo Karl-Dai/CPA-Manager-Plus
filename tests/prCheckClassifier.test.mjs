@@ -13,6 +13,7 @@ import {
 const noChecks = {
   frontend: false,
   manager_server: false,
+  runtime_supervisor: false,
   windows_sqlite: false,
   native_control: false,
   docker: false,
@@ -25,6 +26,7 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles([])).toEqual({
       frontend: true,
       manager_server: true,
+      runtime_supervisor: true,
       windows_sqlite: true,
       native_control: true,
       docker: true,
@@ -116,6 +118,47 @@ describe('PR check classifier', () => {
     });
   });
 
+  it('runs only Supervisor checks for Supervisor module changes', () => {
+    for (const filePath of [
+      'apps/runtime-supervisor/go.mod',
+      'apps/runtime-supervisor/internal/protocol/handler.go',
+      './apps\\runtime-supervisor\\cmd\\cpamp-runtime-supervisor\\main_test.go',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({
+        ...noChecks,
+        runtime_supervisor: true,
+      });
+    }
+  });
+
+  it('runs both necessary check sets for mixed Manager and Supervisor changes', () => {
+    expect(
+      classifyChangedFiles([
+        'apps/manager-server/internal/service/runtime/embedded.go',
+        'apps/runtime-supervisor/internal/protocol/handler.go',
+      ])
+    ).toEqual({
+      ...noChecks,
+      manager_server: true,
+      runtime_supervisor: true,
+      windows_sqlite: true,
+      docker: true,
+    });
+  });
+
+  it('runs Supervisor checks when its architecture gate or fixtures change', () => {
+    for (const filePath of [
+      'bin/ci/runtime-boundary/main.go',
+      'bin/ci/runtime-boundary/main_test.go',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({
+        ...noChecks,
+        runtime_supervisor: true,
+      });
+    }
+    expect(classifyChangedFiles(['apps/runtime-supervisor-extra/main.go'])).toEqual(noChecks);
+  });
+
   it('runs build coverage for native packaging changes', () => {
     expect(classifyChangedFiles(['bin/release/package-native.sh'])).toEqual({
       ...noChecks,
@@ -153,6 +196,7 @@ describe('PR check classifier', () => {
       expect(classifyChangedFiles([filePath])).toEqual({
         frontend: true,
         manager_server: true,
+        runtime_supervisor: true,
         windows_sqlite: true,
         native_control: true,
         docker: true,

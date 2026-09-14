@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const CHECK_NAMES = [
   'frontend',
   'manager_server',
+  'runtime_supervisor',
   'windows_sqlite',
   'native_control',
   'docker',
@@ -52,6 +53,10 @@ const triggersFrontend = (filePath) =>
 const triggersManagerServer = (filePath) =>
   startsWithPath(filePath, 'apps/manager-server') || filePath === 'bin/release/package-native.sh';
 
+const triggersRuntimeSupervisor = (filePath) =>
+  startsWithPath(filePath, 'apps/runtime-supervisor') ||
+  startsWithPath(filePath, 'bin/ci/runtime-boundary');
+
 const triggersNativeControl = (filePath) =>
   startsWithPath(filePath, 'bin/native') ||
   filePath === 'bin/release/package-native.sh' ||
@@ -89,6 +94,7 @@ export const classifyChangedFiles = (changedFiles) => {
   return {
     frontend,
     manager_server: managerServer,
+    runtime_supervisor: files.some(triggersRuntimeSupervisor),
     windows_sqlite: managerServer,
     native_control: files.some(triggersNativeControl),
     docker: files.some(triggersDocker),

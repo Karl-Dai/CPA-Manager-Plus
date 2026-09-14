@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -89,6 +90,68 @@ describe('GitHub Actions workflow integrity', () => {
     expect(requiredJob).toContain('- demo-docs');
     expect(requiredJob).toContain("DEMO_DOCS_RESULT: ${{ needs['demo-docs'].result }}");
     expect(requiredJob).toContain('"Demo and Docs:${DEMO_DOCS_RESULT}"');
+  });
+
+  it('runs Supervisor verification through classification and the required-check aggregate', () => {
+    const workflow = readWorkflow('pr-check.yml');
+    const scopeJob = jobBlock(workflow, 'changes');
+    const supervisorJob = jobBlock(workflow, 'runtime-supervisor');
+    const requiredJob = jobBlock(workflow, 'required');
+
+    expect(scopeJob).toContain(
+      'runtime_supervisor: ${{ steps.classify.outputs.runtime_supervisor }}'
+    );
+    expect(supervisorJob).toContain("if: needs.changes.outputs.runtime_supervisor == 'true'");
+    expect(supervisorJob).toContain('working-directory: apps/runtime-supervisor');
+    expect(supervisorJob).toContain('cache-dependency-path: apps/runtime-supervisor/go.mod');
+    expect(supervisorJob).toContain('run: go test ./...');
+    expect(supervisorJob).toContain('run: go vet ./...');
+    for (const target of ['linux/amd64', 'linux/arm64', 'windows/amd64']) {
+      expect(supervisorJob).toContain(target);
+    }
+    expect(supervisorJob).toContain('CGO_ENABLED=0');
+    expect(supervisorJob).toContain('go build -trimpath');
+    expect(supervisorJob).toContain(
+      'run: go test ./bin/ci/runtime-boundary/main.go ./bin/ci/runtime-boundary/main_test.go'
+    );
+    expect(supervisorJob).toContain('run: go run ./bin/ci/runtime-boundary/main.go');
+    expect(requiredJob).toContain('- runtime-supervisor');
+    expect(requiredJob).toContain(
+      "RUNTIME_SUPERVISOR_RESULT: ${{ needs['runtime-supervisor'].result }}"
+    );
+    expect(requiredJob).toContain('"Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"');
+  });
+
+  it('fails Required checks when Supervisor validation fails or is cancelled', () => {
+    const requiredJob = jobBlock(readWorkflow('pr-check.yml'), 'required');
+    const script = requiredJob.split('        run: |\n')[1].replace(/^ {10}/gm, '');
+    const successResults = Object.fromEntries(
+      [...requiredJob.matchAll(/^\s+([A-Z_]+_RESULT):/gm)].map(([, name]) => [name, 'success'])
+    );
+
+    for (const result of ['success', 'skipped', 'failure', 'cancelled']) {
+      const execution = spawnSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: { ...process.env, ...successResults, RUNTIME_SUPERVISOR_RESULT: result },
+      });
+      expect(execution.error).toBeUndefined();
+      expect(execution.status).toBe(['success', 'skipped'].includes(result) ? 0 : 1);
+      if (['failure', 'cancelled'].includes(result)) {
+        expect(execution.stderr).toContain(
+          `Runtime Supervisor did not complete successfully: ${result}`
+        );
+      }
+    }
+  });
+
+  it('keeps the existing main, dev, and v2 workflow triggers', () => {
+    const workflow = readWorkflow('pr-check.yml');
+    const trigger = workflow.slice(0, workflow.indexOf('\npermissions:'));
+    for (const event of ['pull_request', 'push']) {
+      expect(trigger).toContain(
+        `  ${event}:\n    branches:\n      - main\n      - dev\n      - v2\n`
+      );
+    }
   });
 
   it('keeps release content validation inside the stable required-check aggregate', () => {
