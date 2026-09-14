@@ -23,21 +23,32 @@ type ManagementConfig struct {
 }
 
 func ValidateManagementAPI(ctx context.Context, baseURL string, key string) error {
+	_, err := ObserveManagementAPI(ctx, baseURL, key)
+	return err
+}
+
+// ObserveManagementAPI verifies authenticated access to CPA and returns the
+// running version advertised by the Management API, when available.
+func ObserveManagementAPI(ctx context.Context, baseURL string, key string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, NormalizeBaseURL(baseURL)+"/v0/management/config", nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer res.Body.Close()
-	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		return nil
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", errors.New("management API validation failed: " + res.Status)
 	}
-	return errors.New("management API validation failed: " + res.Status)
+	version := strings.TrimSpace(res.Header.Get("X-CPA-Version"))
+	if version == "" {
+		version = strings.TrimSpace(res.Header.Get("X-Server-Version"))
+	}
+	return version, nil
 }
 
 func FetchUsageConfig(ctx context.Context, baseURL string, key string) (UsageConfig, error) {
