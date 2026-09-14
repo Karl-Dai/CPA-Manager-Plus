@@ -32,6 +32,7 @@ jobs:
     outputs:
       frontend: ${{ steps.classify.outputs.frontend }}
       manager_server: ${{ steps.classify.outputs.manager_server }}
+      runtime_supervisor: ${{ steps.classify.outputs.runtime_supervisor }}
       windows_sqlite: ${{ steps.classify.outputs.windows_sqlite }}
       native_control: ${{ steps.classify.outputs.native_control }}
       docker: ${{ steps.classify.outputs.docker }}
@@ -128,6 +129,52 @@ jobs:
       - name: Test
         working-directory: apps/manager-server
         run: go test ./...
+
+  runtime-supervisor:
+    name: Runtime Supervisor
+    needs: changes
+    if: needs.changes.outputs.runtime_supervisor == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+      GOFLAGS: -mod=readonly
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: apps/runtime-supervisor/go.mod
+
+      - name: Test
+        working-directory: apps/runtime-supervisor
+        run: go test ./...
+
+      - name: Vet
+        working-directory: apps/runtime-supervisor
+        run: go vet ./...
+
+      - name: Portability build
+        working-directory: apps/runtime-supervisor
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            echo "Building ${target}"
+            output="${RUNNER_TEMP}/cpamp-runtime-supervisor-${target%/*}-${target#*/}"
+            if [ "${target%/*}" = windows ]; then output+=".exe"; fi
+            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              go build -trimpath -o "${output}" ./cmd/cpamp-runtime-supervisor
+          done
+
+      - name: Test architecture boundary
+        run: go test ./bin/ci/runtime-boundary/main.go ./bin/ci/runtime-boundary/main_test.go
+
+      - name: Validate architecture boundary
+        run: go run ./bin/ci/runtime-boundary/main.go
 
   manager-server-windows-sqlite:
     name: Manager Server SQLite (Windows)
@@ -288,6 +335,7 @@ jobs:
       - changes
       - frontend
       - manager-server
+      - runtime-supervisor
       - manager-server-windows-sqlite
       - native-control
       - docker-build
@@ -302,6 +350,7 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           MANAGER_SERVER_RESULT: ${{ needs['manager-server'].result }}
+          RUNTIME_SUPERVISOR_RESULT: ${{ needs['runtime-supervisor'].result }}
           WINDOWS_SQLITE_RESULT: ${{ needs['manager-server-windows-sqlite'].result }}
           NATIVE_CONTROL_RESULT: ${{ needs['native-control'].result }}
           DOCKER_BUILD_RESULT: ${{ needs['docker-build'].result }}
@@ -315,6 +364,7 @@ jobs:
             "Scope:${CHANGES_RESULT}"
             "Frontend:${FRONTEND_RESULT}"
             "Manager Server:${MANAGER_SERVER_RESULT}"
+            "Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"
             "Manager Server SQLite (Windows):${WINDOWS_SQLITE_RESULT}"
             "Native Control:${NATIVE_CONTROL_RESULT}"
             "Docker Build:${DOCKER_BUILD_RESULT}"
