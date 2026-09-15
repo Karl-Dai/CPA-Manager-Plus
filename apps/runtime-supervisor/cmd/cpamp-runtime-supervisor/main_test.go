@@ -4,13 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -176,6 +184,185 @@ func TestServeStopsCleanlyWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestSupervisorShutdownClosesLifecycleAdmissionBeforeDraining(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAccepted := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		cancel()
+		releaseAccepted()
+		_ = listener.Close()
+	})
+
+	journalPath := filepath.Join(t.TempDir(), "operations.sqlite")
+	store, err := journal.Open(t.Context(), journalPath, journal.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackedJournal := &shutdownJournal{Store: store}
+	child := &shutdownProcess{entered: make(chan struct{}), release: release}
+	executor, err := lifecycle.NewExecutor(
+		journal.Authority{RuntimeIdentity: "runtime-01", RuntimeGeneration: 41},
+		trackedJournal,
+		child,
+		"supervisor-local-cpa",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := &queuedStartExecutor{
+		next:        executor,
+		operationID: "queued-start",
+		waiting:     make(chan struct{}),
+	}
+	protocolHandler, err := protocol.NewHandler(protocol.Config{
+		RuntimeIdentity:   "runtime-01",
+		RuntimeGeneration: 41,
+		Token:             "runtime-token",
+		Start:             queued,
+		Stop:              executor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &runtimeHandler{Handler: protocolHandler, executor: executor}
+	shutdown := &shutdownAdmissionObserver{runtimeHandler: runtime, closed: make(chan struct{})}
+	serveResult := make(chan error, 1)
+	go func() {
+		serveErr := serve(ctx, listener, shutdown)
+		serveResult <- errors.Join(serveErr, runtime.Close())
+	}()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	submit := func(operationID string) <-chan shutdownHTTPResult {
+		result := make(chan shutdownHTTPResult, 1)
+		go func() {
+			req, err := http.NewRequest(
+				http.MethodPost,
+				"http://"+listener.Addr().String()+"/v1/runtime/operations/start",
+				strings.NewReader(startBody(operationID, 41)),
+			)
+			if err != nil {
+				result <- shutdownHTTPResult{err: err}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer runtime-token")
+			response, err := client.Do(req)
+			if err != nil {
+				result <- shutdownHTTPResult{err: err}
+				return
+			}
+			body, readErr := io.ReadAll(response.Body)
+			result <- shutdownHTTPResult{
+				status: response.StatusCode,
+				body:   string(body),
+				err:    errors.Join(readErr, response.Body.Close()),
+			}
+		}()
+		return result
+	}
+
+	acceptedResult := submit("accepted-start")
+	select {
+	case <-child.entered:
+	case <-time.After(time.Second):
+		t.Fatal("accepted Start did not reach its process side effect")
+	}
+	queuedResult := submit("queued-start")
+	select {
+	case <-queued.waiting:
+	case <-time.After(time.Second):
+		t.Fatal("second Start did not enter the handler and wait on the lifecycle gate")
+	}
+
+	cancel()
+	select {
+	case <-shutdown.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Supervisor shutdown did not close lifecycle admission")
+	}
+	if child.startCount() != 1 {
+		t.Fatalf("process starts before drain = %d, want 1", child.startCount())
+	}
+	if trackedJournal.closeCount() != 0 {
+		t.Fatalf("journal closed while accepted Start was still executing")
+	}
+	if resolves, begins := trackedJournal.submissionCounts(); resolves != 1 || begins != 1 {
+		t.Fatalf("journal submissions before drain = Resolve %d, Begin %d; want 1, 1", resolves, begins)
+	}
+	select {
+	case err := <-serveResult:
+		t.Fatalf("server shutdown completed before accepted Start drained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	reader, err := journal.Open(t.Context(), journalPath, journal.Options{})
+	if err != nil {
+		t.Fatalf("open journal during accepted execution: %v", err)
+	}
+	accepted, acceptedErr := reader.Get(t.Context(), "runtime-01", "accepted-start")
+	_, queuedErr := reader.Get(t.Context(), "runtime-01", "queued-start")
+	if closeErr := reader.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if acceptedErr != nil || accepted.State != journal.StateRunning {
+		t.Fatalf("accepted durable execution = %+v, %v", accepted, acceptedErr)
+	}
+	if !errors.Is(queuedErr, journal.ErrOperationNotFound) {
+		t.Fatalf("queued Start wrote durable intent before drain: %v", queuedErr)
+	}
+
+	releaseAccepted()
+	acceptedHTTP := <-acceptedResult
+	if acceptedHTTP.err != nil || acceptedHTTP.status != http.StatusOK || !strings.Contains(acceptedHTTP.body, `"state":"succeeded"`) {
+		t.Fatalf("accepted Start response = %d, %s, %v", acceptedHTTP.status, acceptedHTTP.body, acceptedHTTP.err)
+	}
+	queuedHTTP := <-queuedResult
+	if queuedHTTP.err != nil || queuedHTTP.status != http.StatusServiceUnavailable ||
+		!strings.Contains(queuedHTTP.body, "operation_persistence_unavailable") {
+		t.Fatalf("queued Start response = %d, %s, %v", queuedHTTP.status, queuedHTTP.body, queuedHTTP.err)
+	}
+	select {
+	case err := <-serveResult:
+		if err != nil {
+			t.Fatalf("Supervisor shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server shutdown did not finish after accepted Start drained")
+	}
+	if child.startCount() != 1 {
+		t.Fatalf("shutdown admitted an additional process Start: %d", child.startCount())
+	}
+	if trackedJournal.closeCount() != 1 {
+		t.Fatalf("journal close calls = %d, want 1", trackedJournal.closeCount())
+	}
+	if resolves, begins := trackedJournal.submissionCounts(); resolves != 1 || begins != 1 {
+		t.Fatalf("queued Start reached journal = Resolve %d, Begin %d; want 1, 1", resolves, begins)
+	}
+	if err := runtime.Close(); err != nil || trackedJournal.closeCount() != 1 {
+		t.Fatalf("repeated runtime Close = %v, journal close calls %d", err, trackedJournal.closeCount())
+	}
+
+	reopened, err := journal.Open(t.Context(), journalPath, journal.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	accepted, acceptedErr = reopened.Get(t.Context(), "runtime-01", "accepted-start")
+	_, queuedErr = reopened.Get(t.Context(), "runtime-01", "queued-start")
+	if acceptedErr != nil || accepted.State != journal.StateSucceeded {
+		t.Fatalf("drained durable execution = %+v, %v", accepted, acceptedErr)
+	}
+	if !errors.Is(queuedErr, journal.ErrOperationNotFound) {
+		t.Fatalf("queued Start wrote durable intent during shutdown: %v", queuedErr)
+	}
+}
+
 func TestServeReportsListenerFailure(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -283,4 +470,138 @@ func requestRuntime(t *testing.T, handler http.Handler, path string) runtimeResp
 		t.Fatalf("decode GET %s response: %v", path, err)
 	}
 	return response
+}
+
+type shutdownAdmissionObserver struct {
+	*runtimeHandler
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (h *shutdownAdmissionObserver) CloseAdmission() {
+	h.runtimeHandler.CloseAdmission()
+	h.once.Do(func() { close(h.closed) })
+}
+
+type queuedStartExecutor struct {
+	next        protocol.StartExecutor
+	operationID string
+	waiting     chan struct{}
+	once        sync.Once
+}
+
+func (e *queuedStartExecutor) Start(ctx context.Context, request lifecycle.StartRequest) (journal.Operation, error) {
+	if request.OperationID != e.operationID {
+		return e.next.Start(ctx, request)
+	}
+	type result struct {
+		operation journal.Operation
+		err       error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		operation, err := e.next.Start(ctx, request)
+		completed <- result{operation: operation, err: err}
+	}()
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case got := <-completed:
+		return got.operation, got.err
+	case <-timer.C:
+		e.once.Do(func() { close(e.waiting) })
+		got := <-completed
+		return got.operation, got.err
+	}
+}
+
+type shutdownJournal struct {
+	*journal.Store
+	mu           sync.Mutex
+	resolveCalls int
+	beginCalls   int
+	closeCalls   int
+}
+
+func (j *shutdownJournal) Resolve(ctx context.Context, authority journal.Authority, intent journal.Intent) (journal.Operation, bool, error) {
+	j.mu.Lock()
+	j.resolveCalls++
+	j.mu.Unlock()
+	return j.Store.Resolve(ctx, authority, intent)
+}
+
+func (j *shutdownJournal) Begin(ctx context.Context, authority journal.Authority, intent journal.Intent) (journal.Operation, bool, error) {
+	j.mu.Lock()
+	j.beginCalls++
+	j.mu.Unlock()
+	return j.Store.Begin(ctx, authority, intent)
+}
+
+func (j *shutdownJournal) Close() error {
+	j.mu.Lock()
+	j.closeCalls++
+	j.mu.Unlock()
+	return j.Store.Close()
+}
+
+func (j *shutdownJournal) closeCount() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.closeCalls
+}
+
+func (j *shutdownJournal) submissionCounts() (int, int) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.resolveCalls, j.beginCalls
+}
+
+type shutdownProcess struct {
+	mu          sync.Mutex
+	observation cpaprocess.Observation
+	starts      int
+	entered     chan struct{}
+	release     <-chan struct{}
+	once        sync.Once
+}
+
+func (p *shutdownProcess) Observe() cpaprocess.Observation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.observation.State == "" {
+		return cpaprocess.Observation{State: cpaprocess.StateNotStarted}
+	}
+	return p.observation
+}
+
+func (p *shutdownProcess) Start(ctx context.Context, _ cpaprocess.StartSpec) (cpaprocess.Observation, error) {
+	p.mu.Lock()
+	p.starts++
+	p.mu.Unlock()
+	p.once.Do(func() { close(p.entered) })
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return p.Observe(), ctx.Err()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.observation = cpaprocess.Observation{State: cpaprocess.StateRunning, PID: 123}
+	return p.observation, nil
+}
+
+func (p *shutdownProcess) PrepareStop() (cpaprocess.StopTarget, error) {
+	return nil, cpaprocess.ErrStateConflict
+}
+
+func (p *shutdownProcess) startCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.starts
+}
+
+type shutdownHTTPResult struct {
+	status int
+	body   string
+	err    error
 }

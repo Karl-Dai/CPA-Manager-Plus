@@ -172,14 +172,19 @@ func submissionError(err error) error {
 	}
 }
 
+// CloseAdmission prevents new lifecycle mutations from entering the shared
+// execution gate. Submissions already queued on the gate recheck this state
+// before resolving or recording durable intent.
+func (e *Executor) CloseAdmission() {
+	e.closed.Store(true)
+}
+
 // Close drains any synchronous execution before closing the startup-owned
 // journal, including after HTTP shutdown forcibly disconnects a caller. It
 // rejects later submissions and does not stop the CPA child.
 func (e *Executor) Close() error {
+	e.CloseAdmission()
 	e.closeOnce.Do(func() {
-		// Close admission before waiting on the execution gate so submissions
-		// queued behind an accepted mutation cannot extend shutdown.
-		e.closed.Store(true)
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.closeErr = e.journal.Close()

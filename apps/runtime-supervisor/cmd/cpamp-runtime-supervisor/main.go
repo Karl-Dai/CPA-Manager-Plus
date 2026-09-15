@@ -110,6 +110,10 @@ func serve(ctx context.Context, listener net.Listener, handler http.Handler) err
 	return serveWithShutdownTimeout(ctx, listener, handler, shutdownTimeout)
 }
 
+type lifecycleAdmissionCloser interface {
+	CloseAdmission()
+}
+
 func serveWithShutdownTimeout(ctx context.Context, listener net.Listener, handler http.Handler, timeout time.Duration) error {
 	server := newHTTPServer(handler)
 	serveResult := make(chan error, 1)
@@ -127,6 +131,9 @@ func serveWithShutdownTimeout(ctx context.Context, listener net.Listener, handle
 	case <-ctx.Done():
 	}
 
+	if lifecycle, ok := handler.(lifecycleAdmissionCloser); ok {
+		lifecycle.CloseAdmission()
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	shutdownErr := server.Shutdown(shutdownCtx)

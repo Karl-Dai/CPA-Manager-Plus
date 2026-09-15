@@ -69,3 +69,9 @@ func (r *runtimeHandler) Close() error {
 	}
 	return r.executor.Close()
 }
+
+func (r *runtimeHandler) CloseAdmission() {
+	if r.executor != nil {
+		r.executor.CloseAdmission()
+	}
+}
