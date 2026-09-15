@@ -1,4 +1,4 @@
-// Package protocol implements the read-only Runtime Protocol v1 surface.
+// Package protocol implements the authenticated Runtime Protocol v1 surface.
 package protocol
 
 import (
@@ -21,12 +21,14 @@ type Config struct {
 	RuntimeIdentity   string
 	RuntimeGeneration uint64
 	Token             string
+	Start             StartExecutor
 }
 
 type handler struct {
 	runtimeIdentity   string
 	runtimeGeneration uint64
 	tokenDigest       [sha256.Size]byte
+	start             StartExecutor
 }
 
 type handshakeResponse struct {
@@ -72,18 +74,22 @@ func NewHandler(config Config) (http.Handler, error) {
 		runtimeIdentity:   identity,
 		runtimeGeneration: config.RuntimeGeneration,
 		tokenDigest:       sha256.Sum256([]byte(config.Token)),
+		start:             config.Start,
 	}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	method := http.MethodGet
 	switch r.URL.Path {
 	case handshakePath, statusPath:
+	case startPath:
+		method = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "runtime endpoint not found")
 		return
 	}
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
+	if r.Method != method {
+		w.Header().Set("Allow", method)
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
@@ -99,7 +105,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ProtocolVersion:   Version,
 			RuntimeIdentity:   h.runtimeIdentity,
 			RuntimeGeneration: h.runtimeGeneration,
-			Capabilities:      []string{},
+			Capabilities:      h.capabilities(),
 		})
 	case statusPath:
 		writeJSON(w, http.StatusOK, statusResponse{
@@ -108,9 +114,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			RuntimeGeneration:  h.runtimeGeneration,
 			State:              "unknown",
 			CPAObservedVersion: "",
-			Capabilities:       []string{},
+			Capabilities:       h.capabilities(),
 		})
+	case startPath:
+		h.submitStart(w, r)
 	}
+}
+
+func (h *handler) capabilities() []string {
+	if h.start != nil {
+		return []string{CapabilityStart}
+	}
+	return []string{}
 }
 
 func (h *handler) authorized(authorization string) bool {

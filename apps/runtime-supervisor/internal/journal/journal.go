@@ -42,11 +42,11 @@ func (state State) terminal() bool {
 // RequestFingerprint identifies an operation-specific logical request. The
 // caller must derive it only from deterministic, secret-free identity fields;
 // secret-bearing material must not reach the journal, including in hashed form.
-// The operation type is stored and compared separately by Store.Begin.
+// The operation type is stored and compared separately by Resolve and Begin.
 type RequestFingerprint [requestFingerprintSize]byte
 
 // Authority is the current Supervisor process incarnation authority. It is
-// supplied for each Begin call and is never restored from journal storage.
+// supplied for each submission and is never restored from journal storage.
 type Authority struct {
 	RuntimeIdentity   string
 	RuntimeGeneration uint64
@@ -109,6 +109,22 @@ func validateIntent(intent Intent) error {
 	}
 	if intent.RequestFingerprint == (RequestFingerprint{}) {
 		return errors.New("request fingerprint is required")
+	}
+	return nil
+}
+
+func validateSubmission(authority Authority, intent Intent) error {
+	if err := validateAuthority(authority); err != nil {
+		return err
+	}
+	if err := validateIntent(intent); err != nil {
+		return err
+	}
+	if intent.ExpectedRuntimeIdentity != authority.RuntimeIdentity {
+		return ErrRuntimeIdentityMismatch
+	}
+	if intent.ExpectedRuntimeGeneration != authority.RuntimeGeneration {
+		return ErrStaleRuntimeGeneration
 	}
 	return nil
 }

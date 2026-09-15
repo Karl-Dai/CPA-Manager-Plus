@@ -16,7 +16,7 @@ func TestCPAStartAndExitPreserveSupervisorGeneration(t *testing.T) {
 		generationCalls++
 		return 41, nil
 	})
-	handler, err := newRuntimeHandler(cfg)
+	handler, err := newRuntimeHandler(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
