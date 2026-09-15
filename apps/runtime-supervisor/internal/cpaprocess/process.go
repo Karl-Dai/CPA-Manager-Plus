@@ -75,6 +75,7 @@ type Manager struct {
 	nextInstance uint64
 	observation  Observation
 	exitEvents   chan ExitEvent
+	exitPublish  sync.Mutex
 }
 
 // StopTarget is an opaque reservation for the exact child owned when Stop was
@@ -301,21 +302,33 @@ func (m *Manager) wait(cmd *exec.Cmd, done chan struct{}) {
 	events := m.exitEventsLocked()
 	m.mu.Unlock()
 	close(done)
+	m.publishConfirmedExit(events, ExitEvent{InstanceID: instanceID})
+}
 
-	// Ownership and exact exit observation are already published. A slow or
-	// absent recovery consumer must never hold up Wait/reap completion.
+// publishConfirmedExit never blocks Wait/reap. Publishers are serialized, and
+// a full single-slot channel retains the greatest monotonic InstanceID so a
+// delayed old-child publisher cannot overwrite a newer eligible crash.
+func (m *Manager) publishConfirmedExit(events chan ExitEvent, event ExitEvent) {
+	m.exitPublish.Lock()
+	defer m.exitPublish.Unlock()
 	select {
-	case events <- ExitEvent{InstanceID: instanceID}:
+	case events <- event:
+		return
 	default:
-		// Only one child can be owned at a time. Prefer retaining the newest
-		// exact exit if the consumer has not drained an older notification.
-		select {
-		case <-events:
-		default:
+	}
+
+	select {
+	case pending := <-events:
+		if pending.InstanceID > event.InstanceID {
+			event = pending
 		}
-		select {
-		case events <- ExitEvent{InstanceID: instanceID}:
-		default:
-		}
+	default:
+		// The consumer already received the pending event.
+	}
+	select {
+	case events <- event:
+	default:
+		// Defensive only: the sender lock and receive-only public API make a
+		// second producer impossible here.
 	}
 }

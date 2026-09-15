@@ -116,6 +116,7 @@ func (e *Executor) scheduleAutomaticRecovery(instanceID uint64) {
 
 	go func() {
 		defer e.recoveryWorkers.Done()
+		defer cancel()
 		if !e.waitForRecoveryDelay(timerContext) {
 			return
 		}
@@ -283,9 +284,14 @@ func (e *Executor) armFreshRecovery(started cpaprocess.Observation) {
 	e.reconcileConfirmedExit(started.InstanceID)
 }
 
-func (e *Executor) manualRecoveryForPersistenceError(err error) {
+// failRecoveryForAmbiguousBegin preserves the current lease when Begin proves
+// that no intent could have committed. Other persistence errors remain
+// ambiguous and fail closed before any new lifecycle side effect.
+func (e *Executor) failRecoveryForAmbiguousBegin(err error) {
 	switch {
-	case errors.Is(err, journal.ErrRuntimeIdentityMismatch),
+	case errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, journal.ErrRuntimeIdentityMismatch),
 		errors.Is(err, journal.ErrStaleRuntimeGeneration),
 		errors.Is(err, journal.ErrOperationIDConflict),
 		errors.Is(err, journal.ErrOperationStateConflict):

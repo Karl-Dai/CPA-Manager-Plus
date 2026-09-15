@@ -49,7 +49,7 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 	}
 	operation, found, err := e.journal.Resolve(ctx, e.authority, intent)
 	if err != nil {
-		e.manualRecoveryForPersistenceError(err)
+		// Resolve is read-only and cannot supersede existing recovery authority.
 		return journal.Operation{}, submissionError(err)
 	}
 	if found {
@@ -68,7 +68,7 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 
 	operation, created, err := e.journal.Begin(ctx, e.authority, intent)
 	if err != nil {
-		e.disableRecovery(RecoveryStateManualIntervention)
+		e.failRecoveryForAmbiguousBegin(err)
 		return journal.Operation{}, submissionError(err)
 	}
 	if !created {

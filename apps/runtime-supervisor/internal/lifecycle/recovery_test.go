@@ -109,6 +109,79 @@ func TestRecoveryUsesFixedDelayAndStaleTimerCannotCrossExplicitStart(t *testing.
 	assertRecoveryStatus(t, f.executor, RecoveryStateArmed, 3)
 }
 
+func TestCanceledExplicitLifecycleBeforeDurableCommitPreservesRecoveryLease(t *testing.T) {
+	for _, operationType := range []string{"start", "stop", "restart"} {
+		for _, phase := range []string{"resolve", "begin"} {
+			t.Run(operationType+"/"+phase, func(t *testing.T) {
+				f := newRecoveryFixture(t)
+				startRecoveryEpoch(t, f, "initial-start")
+				operationID := operationType + "-cancelled-" + phase
+				before := f.executor.RecoveryStatus()
+
+				var releaseTimer chan struct{}
+				if operationType == "start" {
+					timerWaiting := make(chan struct{})
+					releaseTimer = make(chan struct{})
+					var once sync.Once
+					f.executor.waitForRecoveryDelay = func(ctx context.Context) bool {
+						once.Do(func() { close(timerWaiting) })
+						select {
+						case <-ctx.Done():
+							return false
+						case <-releaseTimer:
+							return true
+						}
+					}
+					f.process.exitCurrent(cpaprocess.StateExited, true)
+					select {
+					case <-timerWaiting:
+					case <-time.After(time.Second):
+						t.Fatal("existing recovery timer was not pending")
+					}
+					before = RecoveryStatus{State: RecoveryStateRecovering, AttemptsRemaining: 3}
+					assertRecoveryStatus(t, f.executor, before.State, before.AttemptsRemaining)
+				}
+
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				f.store.setBefore(phase, operationType, cancel)
+				var err error
+				switch operationType {
+				case "start":
+					_, err = f.executor.Start(ctx, startRequest(operationID))
+				case "stop":
+					_, err = f.executor.Stop(ctx, stopRequest(operationID))
+				case "restart":
+					_, err = f.executor.Restart(ctx, restartRequest(operationID))
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled %s at %s error = %v", operationType, phase, err)
+				}
+				if got := f.executor.RecoveryStatus(); got != before {
+					t.Fatalf("cancelled %s at %s changed lease: got %+v, want %+v", operationType, phase, got, before)
+				}
+				if _, err := f.store.Store.Get(t.Context(), "runtime-01", operationID); !errors.Is(err, journal.ErrOperationNotFound) {
+					t.Fatalf("cancelled %s at %s left durable intent: %v", operationType, phase, err)
+				}
+
+				if operationType == "start" {
+					if f.process.startCount() != 1 {
+						t.Fatal("cancelled Start spawned before the pending recovery timer")
+					}
+					close(releaseTimer)
+					waitRecoveryCondition(t, func() bool {
+						status := f.executor.RecoveryStatus()
+						return f.process.startCount() == 2 && status == (RecoveryStatus{State: RecoveryStateArmed, AttemptsRemaining: 2})
+					})
+				} else if f.process.startCount() != 1 || f.process.stopCount() != 0 ||
+					f.process.current().State != cpaprocess.StateRunning {
+					t.Fatalf("cancelled %s changed the current child", operationType)
+				}
+			})
+		}
+	}
+}
+
 func TestStopDisarmsBeforeExpectedExitAndRestartIgnoresOldExit(t *testing.T) {
 	t.Run("Stop", func(t *testing.T) {
 		f := newRecoveryFixture(t)
@@ -629,12 +702,15 @@ type recoveryJournalEvent struct {
 
 type recoveryJournal struct {
 	*journal.Store
-	mu         sync.Mutex
-	events     []recoveryJournalEvent
-	types      map[string]string
-	failPhase  string
-	failType   string
-	closeCalls int
+	mu          sync.Mutex
+	events      []recoveryJournalEvent
+	types       map[string]string
+	failPhase   string
+	failType    string
+	beforePhase string
+	beforeType  string
+	beforeHook  func()
+	closeCalls  int
 }
 
 func newRecoveryJournal(store *journal.Store) *recoveryJournal {
@@ -648,6 +724,23 @@ func (j *recoveryJournal) setFailure(phase string, operationType string) {
 	j.failType = operationType
 }
 
+func (j *recoveryJournal) setBefore(phase string, operationType string, hook func()) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.beforePhase = phase
+	j.beforeType = operationType
+	j.beforeHook = hook
+}
+
+func (j *recoveryJournal) takeBeforeLocked(phase string, operationType string) func() {
+	if j.beforePhase != phase || j.beforeType != operationType {
+		return nil
+	}
+	hook := j.beforeHook
+	j.beforeHook = nil
+	return hook
+}
+
 func (j *recoveryJournal) shouldFailLocked(phase string, operationType string) bool {
 	return j.failPhase == phase && j.failType == operationType
 }
@@ -656,7 +749,11 @@ func (j *recoveryJournal) Resolve(ctx context.Context, authority journal.Authori
 	j.mu.Lock()
 	j.events = append(j.events, recoveryJournalEvent{phase: "resolve", operationID: intent.OperationID, operationType: intent.OperationType})
 	fail := j.shouldFailLocked("resolve", intent.OperationType)
+	before := j.takeBeforeLocked("resolve", intent.OperationType)
 	j.mu.Unlock()
+	if before != nil {
+		before()
+	}
 	if fail {
 		return journal.Operation{}, false, injectedFailure
 	}
@@ -668,7 +765,11 @@ func (j *recoveryJournal) Begin(ctx context.Context, authority journal.Authority
 	j.events = append(j.events, recoveryJournalEvent{phase: "begin", operationID: intent.OperationID, operationType: intent.OperationType})
 	j.types[intent.OperationID] = intent.OperationType
 	fail := j.shouldFailLocked("begin", intent.OperationType)
+	before := j.takeBeforeLocked("begin", intent.OperationType)
 	j.mu.Unlock()
+	if before != nil {
+		before()
+	}
 	if fail {
 		return journal.Operation{}, false, injectedFailure
 	}
