@@ -4,7 +4,6 @@
 package journal
 
 import (
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,8 +12,9 @@ import (
 )
 
 const (
-	maxOperationIDBytes = 128
-	maxStableCodeBytes  = 128
+	maxOperationIDBytes    = 128
+	maxStableCodeBytes     = 128
+	requestFingerprintSize = 32
 )
 
 var (
@@ -39,16 +39,11 @@ func (state State) terminal() bool {
 	return state == StateSucceeded || state == StateFailed
 }
 
-// RequestFingerprint identifies an operation-specific typed payload. The
-// operation type is stored and compared separately by Store.Begin.
-type RequestFingerprint [sha256.Size]byte
-
-// FingerprintPayload hashes an operation-specific canonical payload. Callers
-// must build those bytes deterministically from the typed request; journal does
-// not accept maps or raw request bodies and never persists canonicalPayload.
-func FingerprintPayload(canonicalPayload []byte) RequestFingerprint {
-	return sha256.Sum256(canonicalPayload)
-}
+// RequestFingerprint identifies an operation-specific logical request. The
+// caller must derive it only from deterministic, secret-free identity fields;
+// secret-bearing material must not reach the journal, including in hashed form.
+// The operation type is stored and compared separately by Store.Begin.
+type RequestFingerprint [requestFingerprintSize]byte
 
 // Authority is the current Supervisor process incarnation authority. It is
 // supplied for each Begin call and is never restored from journal storage.
@@ -57,8 +52,9 @@ type Authority struct {
 	RuntimeGeneration uint64
 }
 
-// Intent contains only durable operation identity. Secret-bearing request
-// material must be reduced to RequestFingerprint before reaching this type.
+// Intent contains only durable operation identity. Its RequestFingerprint must
+// be created by the operation-specific layer after secret-bearing fields have
+// been removed from the logical request identity.
 type Intent struct {
 	OperationID               string
 	OperationType             string

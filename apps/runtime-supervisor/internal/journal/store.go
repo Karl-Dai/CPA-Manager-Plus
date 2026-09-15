@@ -82,6 +82,9 @@ func Open(ctx context.Context, path string, options Options) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o700); err != nil {
 		return nil, fmt.Errorf("create journal directory: %w", err)
 	}
+	if err := prepareDatabaseFile(absolutePath); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dataSourceName(absolutePath))
 	if err != nil {
 		return nil, fmt.Errorf("open journal: %w", err)
@@ -93,11 +96,24 @@ func Open(ctx context.Context, path string, options Options) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := os.Chmod(absolutePath, 0o600); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("restrict journal permissions: %w", err)
-	}
 	return store, nil
+}
+
+// prepareDatabaseFile establishes private permissions before SQLite can create
+// WAL or shared-memory sidecars from the main database file's mode.
+func prepareDatabaseFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("prepare journal file: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("restrict journal permissions: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close prepared journal file: %w", err)
+	}
+	return nil
 }
 
 func dataSourceName(path string) string {
@@ -373,7 +389,7 @@ func scanOperation(row rowScanner) (Operation, error) {
 	); err != nil {
 		return Operation{}, err
 	}
-	if len(generation) != 8 || len(fingerprint) != sha256Size {
+	if len(generation) != 8 || len(fingerprint) != requestFingerprintSize {
 		return Operation{}, errors.New("journal contains invalid binary operation identity")
 	}
 	operation.OperationID = string(operationID)
@@ -395,8 +411,6 @@ func scanOperation(row rowScanner) (Operation, error) {
 	}
 	return operation, nil
 }
-
-const sha256Size = 32
 
 func encodeGeneration(generation uint64) []byte {
 	encoded := make([]byte, 8)

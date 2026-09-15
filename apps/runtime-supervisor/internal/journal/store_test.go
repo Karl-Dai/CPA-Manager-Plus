@@ -3,6 +3,7 @@ package journal
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"math"
 	"os"
@@ -35,6 +36,31 @@ func TestOpenCreatesSchema(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("journal permissions = %o, want no group/other permissions", info.Mode().Perm())
+	}
+}
+
+func TestOpenMakesDatabaseAndLiveWALPrivate(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "permissive-runtime")
+	if err := os.Mkdir(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "operations.sqlite")
+	store := openStore(t, path, Options{})
+	if _, _, err := store.Begin(context.Background(), testAuthority(13), testIntent("op-private", 13, "target=v0")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, journalPath := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(journalPath)
+		if err != nil {
+			t.Fatalf("stat live journal file %q: %v", filepath.Base(journalPath), err)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("live journal file %q permissions = %o, want no group/other permissions", filepath.Base(journalPath), info.Mode().Perm())
+		}
 	}
 }
 
@@ -183,7 +209,7 @@ func TestOperationIDNamespaceIncludesRuntimeIdentity(t *testing.T) {
 		OperationType:             firstIntent.OperationType,
 		ExpectedRuntimeIdentity:   secondAuthority.RuntimeIdentity,
 		ExpectedRuntimeGeneration: secondAuthority.RuntimeGeneration,
-		RequestFingerprint:        FingerprintPayload([]byte("second-runtime-request")),
+		RequestFingerprint:        testRequestFingerprint("second-runtime-request"),
 	}
 	if _, created, err := store.Begin(context.Background(), secondAuthority, secondIntent); err != nil || !created {
 		t.Fatalf("second runtime Begin created = %t, err = %v", created, err)
@@ -203,7 +229,7 @@ func TestBeginRejectsConflictingOperationID(t *testing.T) {
 
 	t.Run("different fingerprint", func(t *testing.T) {
 		conflict := intent
-		conflict.RequestFingerprint = FingerprintPayload([]byte("target=v6"))
+		conflict.RequestFingerprint = testRequestFingerprint("target=v6")
 		if _, _, err := store.Begin(context.Background(), authority, conflict); !errors.Is(err, ErrOperationIDConflict) {
 			t.Fatalf("Begin() error = %v, want operation ID conflict", err)
 		}
@@ -264,7 +290,7 @@ func TestNewSupervisorGenerationDoesNotReplaceHistoricalAuthority(t *testing.T) 
 	reopened := openStore(t, path, Options{})
 	newAuthority := testAuthority(53)
 	staleConflict := intent
-	staleConflict.RequestFingerprint = FingerprintPayload([]byte("different-request"))
+	staleConflict.RequestFingerprint = testRequestFingerprint("different-request")
 	if _, _, err := reopened.Begin(context.Background(), newAuthority, staleConflict); !errors.Is(err, ErrStaleRuntimeGeneration) {
 		t.Fatalf("stale replay error = %v, want stale generation", err)
 	}
@@ -304,17 +330,29 @@ func TestBeginChecksIdentityBeforeGenerationAndStorage(t *testing.T) {
 	}
 }
 
-func TestJournalDoesNotPersistSecretBearingRequest(t *testing.T) {
+func TestJournalPersistsOnlySecretFreeRequestIdentity(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "operations.sqlite")
 	store := openStore(t, path, Options{})
-	secret := "cpamp-test-secret-DO-NOT-PERSIST-7x4Q9m2K"
-	intent := testIntent("op-secret-safe", 61, "target=v11\x00management_key="+secret)
+	type testMutationRequest struct {
+		target        string
+		managementKey string
+	}
+	request := testMutationRequest{
+		target:        "v11",
+		managementKey: "cpamp-test-secret-DO-NOT-PERSIST-7x4Q9m2K",
+	}
+	secretFreeIdentity := "target=" + request.target
+	intent := testIntent("op-secret-safe", 61, secretFreeIdentity)
 	if _, _, err := store.Begin(context.Background(), testAuthority(61), intent); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Close(); err != nil {
+	operation, err := store.Get(context.Background(), "runtime-01", intent.OperationID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if operation.RequestFingerprint != testRequestFingerprint(secretFreeIdentity) {
+		t.Fatalf("stored fingerprint = %x, want secret-free request identity fingerprint", operation.RequestFingerprint)
 	}
 
 	entries, err := os.ReadDir(directory)
@@ -329,7 +367,7 @@ func TestJournalDoesNotPersistSecretBearingRequest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(content, []byte(secret)) {
+		if bytes.Contains(content, []byte(request.managementKey)) {
 			t.Fatalf("journal file %q contains supplied secret", entry.Name())
 		}
 	}
@@ -544,7 +582,7 @@ func TestTombstonePersistsAndPreservesIdempotency(t *testing.T) {
 		t.Fatalf("tombstone replay = %#v, created %t, error %v", replayed, created, err)
 	}
 	conflict := intent
-	conflict.RequestFingerprint = FingerprintPayload([]byte("target=v17"))
+	conflict.RequestFingerprint = testRequestFingerprint("target=v17")
 	if _, _, err := reopened.Begin(context.Background(), authority, conflict); !errors.Is(err, ErrOperationIDConflict) {
 		t.Fatalf("tombstone conflict error = %v", err)
 	}
@@ -570,14 +608,20 @@ func testAuthority(generation uint64) Authority {
 	return Authority{RuntimeIdentity: "runtime-01", RuntimeGeneration: generation}
 }
 
-func testIntent(id string, generation uint64, canonicalPayload string) Intent {
+func testIntent(id string, generation uint64, secretFreeIdentity string) Intent {
 	return Intent{
 		OperationID:               id,
 		OperationType:             "test_operation",
 		ExpectedRuntimeIdentity:   "runtime-01",
 		ExpectedRuntimeGeneration: generation,
-		RequestFingerprint:        FingerprintPayload([]byte(canonicalPayload)),
+		RequestFingerprint:        testRequestFingerprint(secretFreeIdentity),
 	}
+}
+
+// testRequestFingerprint stands in for an operation-specific caller after it
+// has removed all secret-bearing fields from the logical request identity.
+func testRequestFingerprint(secretFreeIdentity string) RequestFingerprint {
+	return sha256.Sum256([]byte(secretFreeIdentity))
 }
 
 func assertOperationIdentity(t *testing.T, operation Operation, authority Authority, intent Intent) {
