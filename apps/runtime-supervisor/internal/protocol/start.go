@@ -18,7 +18,7 @@ const (
 	// current child state permits it or that the Runtime is ready.
 	CapabilityStart = "start"
 	startPath       = "/v1/runtime/operations/start"
-	maxStartBody    = 16 << 10
+	maxMutationBody = 16 << 10
 )
 
 type StartExecutor interface {
@@ -35,7 +35,7 @@ type operationResponse struct {
 }
 
 func (h *handler) submitStart(w http.ResponseWriter, r *http.Request) {
-	request, err := decodeStartRequest(w, r)
+	envelope, err := decodeMutationRequest(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid Start request")
 		return
@@ -44,11 +44,25 @@ func (h *handler) submitStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported_operation", "Start is not configured")
 		return
 	}
-	operation, err := h.start.Start(r.Context(), request)
+	operation, err := h.start.Start(r.Context(), lifecycle.StartRequest(envelope))
 	if err != nil {
-		writeStartError(w, err)
+		writeMutationError(w, err, "Start")
 		return
 	}
+	writeOperationResponse(w, operation, "Start")
+}
+
+type mutationRequest struct {
+	OperationID               string `json:"operationId"`
+	ExpectedRuntimeIdentity   string `json:"expectedRuntimeIdentity"`
+	ExpectedRuntimeGeneration uint64 `json:"expectedRuntimeGeneration"`
+}
+
+func (r mutationRequest) Validate() error {
+	return lifecycle.StartRequest(r).Validate()
+}
+
+func writeOperationResponse(w http.ResponseWriter, operation journal.Operation, operationName string) {
 	response := operationResponse{
 		OperationID:       operation.OperationID,
 		OperationType:     operation.OperationType,
@@ -57,14 +71,14 @@ func (h *handler) submitStart(w http.ResponseWriter, r *http.Request) {
 		State:             operation.State,
 	}
 	if operation.FailureCode != "" {
-		response.Error = &protocolError{Code: operation.FailureCode, Message: "Start execution failed"}
+		response.Error = &protocolError{Code: operation.FailureCode, Message: operationName + " execution failed"}
 	}
 	writeJSON(w, http.StatusOK, response)
 }
 
-func decodeStartRequest(w http.ResponseWriter, r *http.Request) (lifecycle.StartRequest, error) {
-	var request lifecycle.StartRequest
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxStartBody))
+func decodeMutationRequest(w http.ResponseWriter, r *http.Request) (mutationRequest, error) {
+	var request mutationRequest
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMutationBody))
 	if err != nil || !utf8.Valid(body) {
 		return request, lifecycle.ErrInvalidRequest
 	}
@@ -108,8 +122,8 @@ func decodeStartRequest(w http.ResponseWriter, r *http.Request) (lifecycle.Start
 	return request, request.Validate()
 }
 
-func writeStartError(w http.ResponseWriter, err error) {
-	code, message, status := "internal_error", "Start execution failed", http.StatusInternalServerError
+func writeMutationError(w http.ResponseWriter, err error, operationName string) {
+	code, message, status := "internal_error", operationName+" execution failed", http.StatusInternalServerError
 	switch {
 	case errors.Is(err, lifecycle.ErrExecutionFailed):
 		// Post-spawn/result failures remain internal errors even when their
@@ -117,7 +131,7 @@ func writeStartError(w http.ResponseWriter, err error) {
 	case errors.Is(err, lifecycle.ErrPersistenceUnavailable):
 		code, message, status = "operation_persistence_unavailable", "operation persistence is unavailable", http.StatusServiceUnavailable
 	case errors.Is(err, lifecycle.ErrInvalidRequest):
-		code, message, status = "invalid_request", "invalid Start request", http.StatusBadRequest
+		code, message, status = "invalid_request", "invalid "+operationName+" request", http.StatusBadRequest
 	case errors.Is(err, journal.ErrRuntimeIdentityMismatch):
 		code, message, status = "runtime_identity_mismatch", "runtime identity does not match", http.StatusConflict
 	case errors.Is(err, journal.ErrStaleRuntimeGeneration):
@@ -125,7 +139,7 @@ func writeStartError(w http.ResponseWriter, err error) {
 	case errors.Is(err, journal.ErrOperationIDConflict):
 		code, message, status = "operation_id_conflict", "operation ID names a different request", http.StatusConflict
 	case errors.Is(err, journal.ErrOperationStateConflict):
-		code, message, status = "operation_state_conflict", "CPA process ownership does not permit Start", http.StatusConflict
+		code, message, status = "operation_state_conflict", "CPA process ownership does not permit "+operationName, http.StatusConflict
 	}
 	writeError(w, status, code, message)
 }

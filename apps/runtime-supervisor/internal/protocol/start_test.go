@@ -50,7 +50,7 @@ func TestStartStrictRequestValidation(t *testing.T) {
 		"missing generation": `{"operationId":"op","expectedRuntimeIdentity":"runtime-01"}`,
 		"trailing object":    validStartBody + `{}`, "trailing null": validStartBody + `null`,
 		"trailing garbage": validStartBody + `x`,
-		"oversized body":   strings.Repeat(" ", maxStartBody) + validStartBody,
+		"oversized body":   strings.Repeat(" ", maxMutationBody) + validStartBody,
 		"case alias":       strings.Replace(validStartBody, "operationId", "OperationId", 1),
 		"duplicate ID":     strings.Replace(validStartBody, `"operationId":"op"`, `"operationId":"op","operationId":"other"`, 1),
 	}
@@ -96,7 +96,7 @@ func TestStartReadOnlyModeIsUnsupported(t *testing.T) {
 	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != http.MethodPost {
 		t.Fatalf("Start method = %d, Allow %q", method.Code, method.Header().Get("Allow"))
 	}
-	for _, path := range []string{"/v1/runtime/operations/stop", "/v1/runtime/operations/restart", "/v1/runtime/operations/op"} {
+	for _, path := range []string{"/v1/runtime/operations/restart", "/v1/runtime/operations/op"} {
 		if w := request(t, h, http.MethodPost, path, testRuntimeToken); w.Code != http.StatusNotFound {
 			t.Fatalf("out-of-scope endpoint %s is exposed: %d", path, w.Code)
 		}

@@ -63,7 +63,7 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 	}
 	journalPath := strings.TrimSpace(getenv("CPAMP_RUNTIME_JOURNAL_PATH"))
 	executable := strings.TrimSpace(getenv("CPAMP_CPA_EXECUTABLE"))
-	if err := validateStartConfig(journalPath, executable); err != nil {
+	if err := validateLifecycleConfig(journalPath, executable); err != nil {
 		return config{}, err
 	}
 	var generation uint64
