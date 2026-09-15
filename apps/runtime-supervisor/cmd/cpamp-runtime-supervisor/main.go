@@ -15,8 +15,6 @@ import (
 	"syscall"
 	"time"
 	"unicode"
-
-	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
 )
 
 const (
@@ -29,6 +27,8 @@ type config struct {
 	runtimeIdentity   string
 	runtimeGeneration uint64
 	token             string
+	journalPath       string
+	cpaExecutable     string
 }
 
 type generationSource func() (uint64, error)
@@ -61,6 +61,11 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 	if strings.IndexFunc(token, unicode.IsSpace) >= 0 {
 		return config{}, errors.New("CPAMP_RUNTIME_TOKEN must not contain whitespace")
 	}
+	journalPath := strings.TrimSpace(getenv("CPAMP_RUNTIME_JOURNAL_PATH"))
+	executable := strings.TrimSpace(getenv("CPAMP_CPA_EXECUTABLE"))
+	if err := validateStartConfig(journalPath, executable); err != nil {
+		return config{}, err
+	}
 	var generation uint64
 	for generation == 0 {
 		var err error
@@ -74,6 +79,8 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 		runtimeIdentity:   identity,
 		runtimeGeneration: generation,
 		token:             token,
+		journalPath:       journalPath,
+		cpaExecutable:     executable,
 	}, nil
 }
 
@@ -85,29 +92,18 @@ func randomRuntimeGeneration() (uint64, error) {
 	return binary.BigEndian.Uint64(encoded[:]), nil
 }
 
-func run(ctx context.Context, cfg config) error {
-	handler, err := newRuntimeHandler(cfg)
+func run(ctx context.Context, cfg config) (err error) {
+	handler, err := newRuntimeHandler(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	defer func() { err = errors.Join(err, handler.Close()) }()
 	listener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.addr, err)
 	}
 	log.Printf("cpamp-runtime-supervisor listening on %s", listener.Addr())
 	return serve(ctx, listener, handler)
-}
-
-func newRuntimeHandler(cfg config) (http.Handler, error) {
-	handler, err := protocol.NewHandler(protocol.Config{
-		RuntimeIdentity:   cfg.runtimeIdentity,
-		RuntimeGeneration: cfg.runtimeGeneration,
-		Token:             cfg.token,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("configure Runtime Protocol: %w", err)
-	}
-	return handler, nil
 }
 
 func serve(ctx context.Context, listener net.Listener, handler http.Handler) error {

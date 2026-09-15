@@ -103,7 +103,7 @@ func TestLoadConfigFailsWhenGenerationSourceFails(t *testing.T) {
 
 func TestRuntimeGenerationIsStableForSupervisorIncarnation(t *testing.T) {
 	cfg := loadTestConfig(t, fixedGeneration(41))
-	handler, err := newRuntimeHandler(cfg)
+	handler, err := newRuntimeHandler(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("newRuntimeHandler() error = %v", err)
 	}

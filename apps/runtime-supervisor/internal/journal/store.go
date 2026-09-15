@@ -183,17 +183,8 @@ func (store *Store) Begin(ctx context.Context, authority Authority, intent Inten
 	if err := ctx.Err(); err != nil {
 		return Operation{}, false, err
 	}
-	if err := validateAuthority(authority); err != nil {
+	if err := validateSubmission(authority, intent); err != nil {
 		return Operation{}, false, err
-	}
-	if err := validateIntent(intent); err != nil {
-		return Operation{}, false, err
-	}
-	if intent.ExpectedRuntimeIdentity != authority.RuntimeIdentity {
-		return Operation{}, false, ErrRuntimeIdentityMismatch
-	}
-	if intent.ExpectedRuntimeGeneration != authority.RuntimeGeneration {
-		return Operation{}, false, ErrStaleRuntimeGeneration
 	}
 	tx, err := store.beginTransaction(ctx)
 	if err != nil {
@@ -228,6 +219,30 @@ func (store *Store) Begin(ctx context.Context, authority Authority, intent Inten
 		return Operation{}, false, fmt.Errorf("commit operation intent: %w", err)
 	}
 	return operation, created, nil
+}
+
+// Resolve fences a submission before reading its durable idempotency identity.
+// found is false for an unseen ID. It never writes intent or changes state, and
+// does not reserve the ID: callers must serialize operation preconditions and
+// still honor Begin's created result before performing a side effect.
+func (store *Store) Resolve(ctx context.Context, authority Authority, intent Intent) (operation Operation, found bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return Operation{}, false, err
+	}
+	if err := validateSubmission(authority, intent); err != nil {
+		return Operation{}, false, err
+	}
+	operation, err = getOperation(ctx, store.db, authority.RuntimeIdentity, intent.OperationID)
+	if errors.Is(err, ErrOperationNotFound) {
+		return Operation{}, false, nil
+	}
+	if err != nil {
+		return Operation{}, false, err
+	}
+	if operation.OperationType != intent.OperationType || operation.RequestFingerprint != intent.RequestFingerprint {
+		return Operation{}, false, ErrOperationIDConflict
+	}
+	return operation, true, nil
 }
 
 // Get loads one operation without changing current authority.

@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -19,8 +21,9 @@ var (
 )
 
 // StartSpec supplies an executable and literal arguments, never a shell command.
-// The child inherits the Supervisor's environment and working directory. Standard
-// input/output/error use os/exec's null-device defaults; no logs are collected.
+// The child inherits the working directory and ordinary parent environment.
+// Supervisor-private environment variables are excluded at spawn.
+// Standard input/output/error use os/exec's null-device defaults; no logs are collected.
 type StartSpec struct {
 	Executable string
 	Args       []string
@@ -83,6 +86,7 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	}
 
 	cmd := exec.Command(spec.Executable, spec.Args...)
+	cmd.Env = childEnvironment(os.Environ(), runtime.GOOS == "windows")
 	if err := ctx.Err(); err != nil {
 		return m.observeLocked(), err
 	}
@@ -93,6 +97,24 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	m.observation = Observation{State: StateRunning, PID: cmd.Process.Pid}
 	go m.wait(cmd)
 	return m.observation, nil
+}
+
+// childEnvironment strips the Supervisor-private namespace and executable
+// setting. Other entries retain their names, values and order.
+func childEnvironment(parent []string, windows bool) []string {
+	// A nil Cmd.Env would silently restore full Supervisor environment inheritance.
+	env := make([]string, 0, len(parent))
+	for _, entry := range parent {
+		key, _, _ := strings.Cut(entry, "=")
+		if windows {
+			key = strings.ToUpper(key)
+		}
+		if strings.HasPrefix(key, "CPAMP_RUNTIME_") || key == "CPAMP_CPA_EXECUTABLE" {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
 }
 
 // Observe returns a snapshot. Running means spawn succeeded and exit has not

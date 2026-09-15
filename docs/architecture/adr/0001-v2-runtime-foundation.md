@@ -74,7 +74,7 @@ Transport placement:
 - Docker Embedded: private Docker network only; no host publication by default.
 - Native Linux/macOS/Windows: loopback by default.
 
-The protocol MUST be authenticated per installation and MUST support explicit timeouts. The currently implemented read-only slice contains handshake, protocol version, runtime identity/generation, capabilities, status, and running CPA version. Mutation endpoints and lifecycle side effects are separate later slices.
+The protocol MUST be authenticated per installation and MUST support explicit timeouts. The implemented surface contains handshake, protocol version, runtime identity/generation, capabilities, status, running CPA version, and an optional typed Start mutation. Additional lifecycle mutations are separate later slices.
 
 #### Runtime generation
 
@@ -88,7 +88,7 @@ Once mutation capability is enabled, CPA stop, start, restart, crash recovery, o
 
 #### Mutation operation envelope and fencing
 
-Every future mutation request MUST combine common mutation metadata with a typed operation request. The common metadata is:
+Every mutation request MUST combine common mutation metadata with a typed operation request. The common metadata is:
 
 - `operationId`: created by Manager, opaque to Supervisor, non-empty, stable across retries of the same logical mutation, and no more than 128 UTF-8 bytes. The protocol does not require a UUID format.
 - `expectedRuntimeIdentity`: the Runtime identity most recently observed by Manager.
@@ -137,6 +137,32 @@ Runtime Protocol v1 keeps the existing JSON error envelope with a stable code an
 HTTP authentication failure remains the existing `401` protocol behavior and does not introduce a parallel domain authentication error system. Future typed operations may define additional stable application codes without changing this common envelope.
 
 A mutation result contains at least `operationId`, `operationType`, `runtimeIdentity`, `runtimeGeneration`, `state`, and an optional structured reason/error with a stable code and a human-readable message. Message text is not a stable API field. The initial state vocabulary is `accepted`, `running`, `succeeded`, and `failed`. This contract does not introduce progress percentages, streaming, queues, or a workflow engine.
+
+#### Typed Start
+
+`POST /v1/runtime/operations/start` accepts only the common mutation envelope:
+
+```json
+{
+  "operationId": "opaque-id",
+  "expectedRuntimeIdentity": "runtime-id",
+  "expectedRuntimeGeneration": 123
+}
+```
+
+The endpoint fixes the operation type to `start`; its typed payload is empty. The request body is limited to 16 KiB and MUST reject unknown or duplicate fields and trailing JSON values. HTTP callers MUST NOT supply executable paths, arguments, environment, working directories, shell commands, or generic action parameters. Logical request identity is the secret-free, versioned canonical value `runtime.start/v1:{}`; the journal stores its SHA-256 fingerprint and compares the operation type separately.
+
+Start requires the Supervisor-local settings `CPAMP_RUNTIME_JOURNAL_PATH` and `CPAMP_CPA_EXECUTABLE`. Both absent preserves read-only operation and returns `400 unsupported_operation` for a valid authenticated Start request; configuring only one fails startup. With both configured, Supervisor opens its private journal once at startup, retains one Start executor and child manager, and drains accepted execution before closing the journal at shutdown. It does not terminate the child to compensate for a request or persistence failure.
+
+At spawn, Supervisor MUST explicitly build the CPA child environment by removing the Supervisor-private namespace `CPAMP_RUNTIME_*` and the exact variable `CPAMP_CPA_EXECUTABLE`. Name matching is case sensitive on Unix and case insensitive on Windows. All other parent entries retain their names, values and order, including proxy, certificate, timezone, locale, XDG and non-private `CPAMP_*` settings. An empty result MUST NOT fall back to unfiltered parent environment inheritance. New Supervisor-private settings must use that namespace or be explicitly added to the filter. The working directory remains inherited; this boundary does not introduce a general environment override API or OS privilege sandbox.
+
+Handshake and status advertise the exact capability `start` only when the Start executor is configured. This capability means typed Start submission is supported; it does not promise that current process preconditions permit Start. Read-only operation MUST NOT advertise it.
+
+Start submission is serialized. After authentication, strict validation, identity/generation fencing and durable operation-ID lookup, an existing operation is returned with HTTP `200`, its retained state and its creation generation. Replay never resumes or repeats execution, including for `accepted` or `running` evidence. A new Start requires `not_started` or confirmed, reaped `exited` process state; `running` or unknown ownership returns `409 operation_state_conflict` before writing intent.
+
+For a new operation, Supervisor commits accepted intent, commits running evidence, spawns the locally configured executable, and commits a terminal result. Required pre-spawn persistence failure returns `503 operation_persistence_unavailable` and MUST NOT spawn. After durable intent commits, the HTTP caller's cancellation or deadline no longer owns execution or child lifetime. Execution remains synchronous without a queue or recovery worker.
+
+Start `succeeded` means only successful OS spawn and child ownership publication. It does not establish readiness, probe listeners or the CPA Management API, populate observed CPA version, or change RuntimeGeneration. Spawn failure attempts to retain a `failed` result with stable code `process_start_failed` and returns `500 internal_error`. Terminal persistence failure also returns `500 internal_error`; the child may already be running, and retained accepted/running evidence MUST prevent a repeated spawn for the same operation ID. Operation observation and recovery are separate capabilities.
 
 Unix Domain Sockets and Windows Named Pipes are deferred. They may later be introduced as transport adapters without changing protocol semantics.
 

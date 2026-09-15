@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -195,13 +197,144 @@ func TestArgumentsRemainLiteral(t *testing.T) {
 	waitFor(t, func() bool { return len(child.starts(t)) == 1 })
 	child.release(t)
 	assertExit(t, waitForExit(t, &manager), 0)
-	encoded, err := os.ReadFile(filepath.Join(child.dir, "starts", strconv.Itoa(started.PID)))
-	if err != nil {
-		t.Fatal(err)
+	if got := child.report(t, started.PID).Args; !reflect.DeepEqual(got, want) {
+		t.Fatalf("child arguments = %q, want %q", got, want)
 	}
-	var got []string
-	if err := json.Unmarshal(encoded, &got); err != nil || !reflect.DeepEqual(got, want) {
-		t.Fatalf("child arguments = %q, error = %v", got, err)
+}
+
+func TestStartFiltersOnlySupervisorPrivateEnvironment(t *testing.T) {
+	var manager Manager
+	child := newHelper(t, &manager, 0)
+	private := []string{
+		"CPAMP_RUNTIME_TOKEN", "CPAMP_RUNTIME_JOURNAL_PATH", "CPAMP_RUNTIME_IDENTITY",
+		"CPAMP_RUNTIME_ADDR", "CPAMP_RUNTIME_GENERATION", "CPAMP_CPA_EXECUTABLE",
+		"CPAMP_RUNTIME_FUTURE_SECRET",
+	}
+	for _, key := range private {
+		t.Setenv(key, "test-only-private-value")
+	}
+	inherited := []string{
+		"PATH", "TMP", "TEMP", "HOME", "TMPDIR", "USERPROFILE",
+		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+		"TZ", "LANG", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "NORMAL_SENTINEL",
+		"CPAMP_DEPLOYMENT_SENTINEL", "CPAMP_CPA_EXECUTABLE_SUFFIX", "CPAMP_RUNTIME",
+	}
+	for _, key := range inherited {
+		t.Setenv(key, child.dir)
+	}
+	started := startHelper(t, &manager, child)
+	waitFor(t, func() bool { return len(child.starts(t)) == 1 })
+	child.release(t)
+	assertExit(t, waitForExit(t, &manager), 0)
+	report := child.report(t, started.PID)
+	for _, key := range private {
+		if _, found := report.Environment[key]; found {
+			t.Errorf("CPA child inherited private environment variable %s", key)
+		}
+	}
+	for _, key := range inherited {
+		if !report.Environment[key] {
+			t.Errorf("CPA child did not preserve ordinary environment variable %s", key)
+		}
+	}
+}
+
+const (
+	helperHTTPProxy  = "http://http-proxy.invalid:18080"
+	helperHTTPSProxy = "http://https-proxy.invalid:18443"
+	helperNoProxy    = "bypass.invalid"
+)
+
+func TestStartPreservesProxyEnvironment(t *testing.T) {
+	for _, casing := range []string{"uppercase", "lowercase"} {
+		t.Run(casing, func(t *testing.T) {
+			var manager Manager
+			child := newHelper(t, &manager, 0)
+			// ProxyFromEnvironment caches its first environment read, so inspect
+			// routing in a fresh child. No network connection is made.
+			for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "REQUEST_METHOD"} {
+				t.Setenv(key, "")
+			}
+			for key, value := range map[string]string{
+				"HTTP_PROXY": helperHTTPProxy, "HTTPS_PROXY": helperHTTPSProxy, "NO_PROXY": helperNoProxy,
+			} {
+				if casing == "lowercase" {
+					key = strings.ToLower(key)
+				}
+				t.Setenv(key, value)
+			}
+			child.spec.Args = append(child.spec.Args, "check-proxy-environment")
+			started := startHelper(t, &manager, child)
+			waitFor(t, func() bool { return len(child.starts(t)) == 1 })
+			child.release(t)
+			assertExit(t, waitForExit(t, &manager), 0)
+			want := map[string]bool{"http": true, "https": true, "http bypass": true, "https bypass": true}
+			if got := child.report(t, started.PID).ProxyRouting; !reflect.DeepEqual(got, want) {
+				t.Fatalf("child proxy routing checks = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
+	tests := []struct {
+		name    string
+		windows bool
+		parent  []string
+		want    []string
+	}{
+		{
+			name: "Unix names are case sensitive",
+			parent: []string{
+				"CPAMP_RUNTIME_TOKEN=secret", "CPAMP_RUNTIME_FUTURE_SECRET=secret", "CPAMP_CPA_EXECUTABLE=/cpa",
+				"cpamp_runtime_token=ordinary", "cpamp_cpa_executable=ordinary", "CPAMP_RUNTIME=ordinary",
+				"CPAMP_DEPLOYMENT_SENTINEL=ordinary", "CPAMP_CPA_EXECUTABLE_SUFFIX=ordinary",
+				"NORMAL_SENTINEL=first", "CPAMP_RUNTIME_TOKEN=duplicate-secret", "NORMAL_SENTINEL=",
+				"PATH=/bin", "HOME=/home/cpa", "HTTP_PROXY=http://proxy.invalid:3128", "TEMP= /tmp/with=equals ",
+			},
+			want: []string{
+				"cpamp_runtime_token=ordinary", "cpamp_cpa_executable=ordinary", "CPAMP_RUNTIME=ordinary",
+				"CPAMP_DEPLOYMENT_SENTINEL=ordinary", "CPAMP_CPA_EXECUTABLE_SUFFIX=ordinary",
+				"NORMAL_SENTINEL=first", "NORMAL_SENTINEL=",
+				"PATH=/bin", "HOME=/home/cpa", "HTTP_PROXY=http://proxy.invalid:3128", "TEMP= /tmp/with=equals ",
+			},
+		},
+		{
+			name:    "Windows names are case insensitive",
+			windows: true,
+			parent: []string{
+				`Path=C:\bin`, `SystemRoot=C:\Windows`, `wInDiR=C:\Windows`, `UserProfile=C:\Users\cpa`,
+				`HomeDrive=C:`, `HomePath=\Users\cpa`, `tMp=C:\tmp`, `TeMp=C:\temp`,
+				"CpAmP_RuNtImE_ToKeN=secret", "cpamp_runtime_future_secret=secret", "cpamp_cpa_executable=cpa.exe",
+				"Cpamp_Deployment_Sentinel=ordinary", "Cpamp_Cpa_Executable_Suffix=ordinary", "CPAMP_RUNTIME=ordinary",
+				"Http_Proxy=http://proxy.invalid:3128", `=C:=C:\work`,
+			},
+			want: []string{
+				`Path=C:\bin`, `SystemRoot=C:\Windows`, `wInDiR=C:\Windows`, `UserProfile=C:\Users\cpa`,
+				`HomeDrive=C:`, `HomePath=\Users\cpa`, `tMp=C:\tmp`, `TeMp=C:\temp`,
+				"Cpamp_Deployment_Sentinel=ordinary", "Cpamp_Cpa_Executable_Suffix=ordinary", "CPAMP_RUNTIME=ordinary",
+				"Http_Proxy=http://proxy.invalid:3128", `=C:=C:\work`,
+			},
+		},
+		{name: "empty Unix environment", want: []string{}},
+		{name: "empty Windows environment", windows: true, want: []string{}},
+		{name: "only private Unix variables", parent: []string{"CPAMP_RUNTIME_TOKEN=secret"}, want: []string{}},
+		{name: "only private Windows variables", windows: true, parent: []string{"cpamp_runtime_token=secret"}, want: []string{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := slices.Clone(test.parent)
+			got := childEnvironment(test.parent, test.windows)
+			if got == nil {
+				t.Fatal("nil child environment would restore full Supervisor inheritance")
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("child environment = %q, want %q", got, test.want)
+			}
+			if !reflect.DeepEqual(test.parent, parent) {
+				t.Fatal("filter changed the parent environment slice")
+			}
+		})
 	}
 }
 
@@ -249,6 +382,14 @@ type helperChild struct {
 	dir  string
 }
 
+type helperReport struct {
+	Args []string
+	// Record names and whether the value equals the fixture directory, never
+	// arbitrary environment values that could contain Supervisor credentials.
+	Environment  map[string]bool
+	ProxyRouting map[string]bool
+}
+
 func newHelper(t *testing.T, manager *Manager, code int) helperChild {
 	t.Helper()
 	executable, err := os.Executable()
@@ -288,6 +429,19 @@ func (child helperChild) starts(t *testing.T) []os.DirEntry {
 		t.Fatal(err)
 	}
 	return entries
+}
+
+func (child helperChild) report(t *testing.T, pid int) helperReport {
+	t.Helper()
+	encoded, err := os.ReadFile(filepath.Join(child.dir, "starts", strconv.Itoa(pid)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report helperReport
+	if err := json.Unmarshal(encoded, &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
 }
 
 func (child helperChild) release(t *testing.T) {
@@ -331,7 +485,36 @@ func TestCPAProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(96)
 	}
-	encoded, err := json.Marshal(os.Args[separator+4:])
+	report := helperReport{Args: os.Args[separator+4:], Environment: make(map[string]bool)}
+	for _, entry := range os.Environ() {
+		key, value, _ := strings.Cut(entry, "=")
+		if runtime.GOOS == "windows" {
+			key = strings.ToUpper(key)
+		}
+		report.Environment[key] = value == dir
+	}
+	if slices.Contains(report.Args, "check-proxy-environment") {
+		report.ProxyRouting = make(map[string]bool)
+		for _, test := range []struct{ name, target, want string }{
+			{"http", "http://destination.invalid/", helperHTTPProxy},
+			{"https", "https://destination.invalid/", helperHTTPSProxy},
+			{"http bypass", "http://" + helperNoProxy + "/", ""},
+			{"https bypass", "https://" + helperNoProxy + "/", ""},
+		} {
+			request, err := http.NewRequest(http.MethodGet, test.target, nil)
+			if err != nil {
+				os.Exit(96)
+			}
+			proxyURL, err := http.ProxyFromEnvironment(request)
+			var got string
+			if proxyURL != nil {
+				got = proxyURL.String()
+			}
+			// Report only equality with synthetic fixture values, never parent credentials.
+			report.ProxyRouting[test.name] = err == nil && got == test.want
+		}
+	}
+	encoded, err := json.Marshal(report)
 	if err != nil {
 		os.Exit(96)
 	}
