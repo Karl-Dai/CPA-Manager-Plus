@@ -119,7 +119,7 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 		t.Helper()
 		for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 			got := requestRuntime(t, h, path)
-			if got.RuntimeGeneration != generation || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop"}) ||
+			if got.RuntimeGeneration != generation || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
 				got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "unknown") {
 				t.Fatalf("Start changed authority or invented readiness: %+v", got)
 			}
@@ -245,7 +245,7 @@ func TestRuntimeStopEndToEndKeepsReplayAwayFromReplacementChild(t *testing.T) {
 
 	for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 		got := requestRuntime(t, handler, path)
-		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop"}) ||
+		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
 			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "unknown") {
 			t.Fatalf("configured lifecycle metadata = %+v", got)
 		}
@@ -326,6 +326,91 @@ func TestRuntimeStopEndToEndKeepsReplayAwayFromReplacementChild(t *testing.T) {
 	}
 }
 
+func TestRuntimeRestartEndToEndReplacesOwnedChildExactlyOnce(t *testing.T) {
+	directory := t.TempDir()
+	values := validConfigValues()
+	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
+	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
+	values["NORMAL_SENTINEL"] = "test-only-ordinary-value"
+	values["CPAMP_DEPLOYMENT_SENTINEL"] = "test-only-deployment-value"
+	values["HTTP_PROXY"] = "http://http-proxy.invalid:18080"
+	values["HTTPS_PROXY"] = "http://https-proxy.invalid:18443"
+	values["NO_PROXY"] = "bypass.invalid"
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+	cfg, err := loadConfig(os.Getenv, fixedGeneration(41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	exitFile := filepath.Join(directory, "exit")
+	t.Cleanup(func() { _ = os.WriteFile(exitFile, nil, 0o600) })
+
+	if started := runtimeStart(handler, t.Context(), "initial-start", 41); started.Code != http.StatusOK {
+		t.Fatalf("initial Start = %d, %s", started.Code, started.Body.String())
+	}
+	awaitSpawnCount(t, directory, 1)
+
+	restarted := runtimeRestart(handler, t.Context(), "restart", 41)
+	if restarted.Code != http.StatusOK {
+		t.Fatalf("Restart = %d, %s", restarted.Code, restarted.Body.String())
+	}
+	var operation struct {
+		OperationType     string        `json:"operationType"`
+		RuntimeGeneration uint64        `json:"runtimeGeneration"`
+		State             journal.State `json:"state"`
+	}
+	if err := json.Unmarshal(restarted.Body.Bytes(), &operation); err != nil {
+		t.Fatal(err)
+	}
+	if operation.OperationType != "restart" || operation.RuntimeGeneration != 41 || operation.State != journal.StateSucceeded {
+		t.Fatalf("Restart result = %s", restarted.Body.String())
+	}
+	awaitSpawnCount(t, directory, 2)
+	for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
+		got := requestRuntime(t, handler, path)
+		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
+			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "unknown") {
+			t.Fatalf("Restart changed authority or invented readiness: %+v", got)
+		}
+	}
+	if replay := runtimeRestart(handler, t.Context(), "restart", 41); replay.Code != http.StatusOK || replay.Body.String() != restarted.Body.String() {
+		t.Fatalf("same-ID Restart replay = %d, %s", replay.Code, replay.Body.String())
+	}
+	awaitSpawnCount(t, directory, 2)
+	if proof := runtimeStart(handler, t.Context(), "replacement-still-running", 41); proof.Code != http.StatusConflict ||
+		!strings.Contains(proof.Body.String(), "operation_state_conflict") {
+		t.Fatalf("Restart replay affected replacement child = %d, %s", proof.Code, proof.Body.String())
+	}
+	if stopped := runtimeStop(handler, t.Context(), "cleanup-stop", 41); stopped.Code != http.StatusOK {
+		t.Fatalf("Stop replacement = %d, %s", stopped.Code, stopped.Body.String())
+	}
+	if absent := runtimeRestart(handler, t.Context(), "restart-without-child", 41); absent.Code != http.StatusConflict ||
+		!strings.Contains(absent.Body.String(), "operation_state_conflict") {
+		t.Fatalf("Restart without running child = %d, %s", absent.Code, absent.Body.String())
+	}
+
+	reader, err := journal.Open(t.Context(), cfg.journalPath, journal.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	stored, err := reader.Get(t.Context(), cfg.runtimeIdentity, "restart")
+	if err != nil || stored.State != journal.StateSucceeded || stored.OperationType != "restart" || stored.RuntimeGeneration != 41 {
+		t.Fatalf("durable Restart result = %+v, %v", stored, err)
+	}
+	for _, id := range []string{"replacement-still-running", "restart-without-child"} {
+		if _, err := reader.Get(t.Context(), cfg.runtimeIdentity, id); !errors.Is(err, journal.ErrOperationNotFound) {
+			t.Fatalf("rejected operation %q wrote intent: %v", id, err)
+		}
+	}
+}
+
 func copyStartHelper(t *testing.T, directory string) string {
 	t.Helper()
 	executable, err := os.Executable()
@@ -378,6 +463,14 @@ func runtimeStart(handler http.Handler, ctx context.Context, id string, generati
 
 func runtimeStop(handler http.Handler, ctx context.Context, id string, generation uint64) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/v1/runtime/operations/stop", strings.NewReader(startBody(id, generation))).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer runtime-token")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w
+}
+
+func runtimeRestart(handler http.Handler, ctx context.Context, id string, generation uint64) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/runtime/operations/restart", strings.NewReader(startBody(id, generation))).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer runtime-token")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)

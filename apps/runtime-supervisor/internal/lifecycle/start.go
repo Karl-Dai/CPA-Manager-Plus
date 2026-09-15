@@ -67,7 +67,7 @@ type process interface {
 	PrepareStop() (cpaprocess.StopTarget, error)
 }
 
-// Executor owns the shared Start/Stop mutation serialization and resources for
+// Executor owns the shared Start/Stop/Restart serialization and resources for
 // one Supervisor incarnation. The lock covers resolve, precondition and all
 // execution evidence, while cpaprocess remains the final ownership fence.
 type Executor struct {

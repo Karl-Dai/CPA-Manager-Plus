@@ -54,6 +54,7 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		}
 		settings.Start = runtime.executor
 		settings.Stop = runtime.executor
+		settings.Restart = runtime.executor
 	}
 	handler, err := protocol.NewHandler(settings)
 	if err != nil {
