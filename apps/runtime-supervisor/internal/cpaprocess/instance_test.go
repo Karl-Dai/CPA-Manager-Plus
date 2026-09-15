@@ -6,7 +6,26 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestConfirmedExitEventCarriesExactReapedInstance(t *testing.T) {
+	t.Parallel()
+	var manager Manager
+	events := manager.ExitEvents()
+	child := newHelper(t, &manager, 0)
+	started := startHelper(t, &manager, child)
+	child.release(t)
+	exited := waitForExit(t, &manager)
+	select {
+	case event := <-events:
+		if event.InstanceID != started.InstanceID || event.InstanceID != exited.InstanceID {
+			t.Fatalf("exit event = %+v, started/exited = %+v / %+v", event, started, exited)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("confirmed Wait/reap did not publish an exit event")
+	}
+}
 
 func TestChildInstanceCorrelatesSpawnAndReapWithoutReuse(t *testing.T) {
 	t.Parallel()

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 )
 
@@ -28,12 +29,17 @@ type Config struct {
 	Stop              StopExecutor
 	Restart           RestartExecutor
 	Status            StatusObserver
+	Recovery          RecoveryStatusObserver
 }
 
 // StatusObserver supplies read-only availability facts after authentication.
 // Handshake and mutation submission never call it.
 type StatusObserver interface {
 	Observe(context.Context) readiness.State
+}
+
+type RecoveryStatusObserver interface {
+	RecoveryStatus() lifecycle.RecoveryStatus
 }
 
 type handler struct {
@@ -44,6 +50,7 @@ type handler struct {
 	stop              StopExecutor
 	restart           RestartExecutor
 	status            StatusObserver
+	recovery          RecoveryStatusObserver
 }
 
 type handshakeResponse struct {
@@ -54,12 +61,18 @@ type handshakeResponse struct {
 }
 
 type statusResponse struct {
-	ProtocolVersion    string   `json:"protocolVersion"`
-	RuntimeIdentity    string   `json:"runtimeIdentity"`
-	RuntimeGeneration  uint64   `json:"runtimeGeneration"`
-	State              string   `json:"state"`
-	CPAObservedVersion string   `json:"cpaObservedVersion"`
-	Capabilities       []string `json:"capabilities"`
+	ProtocolVersion    string            `json:"protocolVersion"`
+	RuntimeIdentity    string            `json:"runtimeIdentity"`
+	RuntimeGeneration  uint64            `json:"runtimeGeneration"`
+	State              string            `json:"state"`
+	CPAObservedVersion string            `json:"cpaObservedVersion"`
+	Capabilities       []string          `json:"capabilities"`
+	Recovery           *recoveryResponse `json:"recovery,omitempty"`
+}
+
+type recoveryResponse struct {
+	State             string `json:"state"`
+	AttemptsRemaining int    `json:"attemptsRemaining"`
 }
 
 type errorResponse struct {
@@ -93,6 +106,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		stop:              config.Stop,
 		restart:           config.Restart,
 		status:            config.Status,
+		recovery:          config.Recovery,
 	}, nil
 }
 
@@ -130,6 +144,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.status != nil {
 			state = h.status.Observe(r.Context())
 		}
+		var recovery *recoveryResponse
+		if h.recovery != nil {
+			observed := h.recovery.RecoveryStatus()
+			recovery = &recoveryResponse{
+				State:             string(observed.State),
+				AttemptsRemaining: observed.AttemptsRemaining,
+			}
+		}
 		writeJSON(w, http.StatusOK, statusResponse{
 			ProtocolVersion:    Version,
 			RuntimeIdentity:    h.runtimeIdentity,
@@ -137,6 +159,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			State:              string(state),
 			CPAObservedVersion: "",
 			Capabilities:       h.capabilities(),
+			Recovery:           recovery,
 		})
 	case startPath:
 		h.submitStart(w, r)

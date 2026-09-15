@@ -476,7 +476,8 @@ func TestWaitFailureRetainsOwnership(t *testing.T) {
 	// No real child is created or abandoned by this error-path test.
 	cmd := exec.Command("unused-test-command")
 	done := make(chan struct{})
-	manager := Manager{cmd: cmd, waitDone: done, observation: Observation{State: StateRunning, PID: 123}}
+	manager := Manager{cmd: cmd, waitDone: done, observation: Observation{State: StateRunning, InstanceID: 1, PID: 123}}
+	events := manager.ExitEvents()
 	manager.wait(cmd, done)
 	got := manager.Observe()
 	if got.State != StateUnknown || got.PID != 123 || got.WaitError == nil || got.ExitCodeKnown {
@@ -487,6 +488,11 @@ func TestWaitFailureRetainsOwnership(t *testing.T) {
 	}
 	if _, err := manager.Start(t.Context(), StartSpec{Executable: "unused-test-command"}); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("Start after unconfirmed wait error = %v", err)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("unconfirmed Wait published recoverable exit: %+v", event)
+	default:
 	}
 }
 

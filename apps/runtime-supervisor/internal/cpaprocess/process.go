@@ -57,6 +57,14 @@ type Observation struct {
 	WaitError     error
 }
 
+// ExitEvent reports only a child exit confirmed by the Manager's Wait/reap
+// path. InstanceID is the in-memory exact-child correlation authority.
+type ExitEvent struct {
+	InstanceID uint64
+}
+
+const exitEventBuffer = 1
+
 // Manager owns at most one CPA child. Use one Manager per Supervisor incarnation.
 // Its zero value is ready to use; it must not be copied after first use.
 type Manager struct {
@@ -66,6 +74,7 @@ type Manager struct {
 	stopTarget   *exec.Cmd
 	nextInstance uint64
 	observation  Observation
+	exitEvents   chan ExitEvent
 }
 
 // StopTarget is an opaque reservation for the exact child owned when Stop was
@@ -120,6 +129,7 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	}
 	m.cmd = cmd
 	m.waitDone = make(chan struct{})
+	m.exitEventsLocked()
 	m.nextInstance++
 	m.observation = Observation{State: StateRunning, InstanceID: m.nextInstance, PID: cmd.Process.Pid}
 	go m.wait(cmd, m.waitDone)
@@ -233,6 +243,23 @@ func (m *Manager) Observe() Observation {
 	return m.observeLocked()
 }
 
+// ExitEvents returns the Supervisor-private confirmed-exit notification
+// stream. Publishing never blocks the Wait/reap path. Lifecycle recovery also
+// reconciles the exact observation after every durable spawn success, so a
+// fast exit remains visible if its notification was coalesced.
+func (m *Manager) ExitEvents() <-chan ExitEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.exitEventsLocked()
+}
+
+func (m *Manager) exitEventsLocked() chan ExitEvent {
+	if m.exitEvents == nil {
+		m.exitEvents = make(chan ExitEvent, exitEventBuffer)
+	}
+	return m.exitEvents
+}
+
 func (m *Manager) observeLocked() Observation {
 	if m.observation.State == "" {
 		return Observation{State: StateNotStarted}
@@ -243,10 +270,10 @@ func (m *Manager) observeLocked() Observation {
 func (m *Manager) wait(cmd *exec.Cmd, done chan struct{}) {
 	err := cmd.Wait()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	defer close(done)
 
 	if m.cmd != cmd || m.waitDone != done {
+		m.mu.Unlock()
+		close(done)
 		return
 	}
 
@@ -255,11 +282,14 @@ func (m *Manager) wait(cmd *exec.Cmd, done chan struct{}) {
 		// reservation so an unconfirmed exit cannot permit a second child.
 		m.observation.State = StateUnknown
 		m.observation.WaitError = err
+		m.mu.Unlock()
+		close(done)
 		return
 	}
 	m.cmd = nil
 	m.waitDone = nil
-	m.observation = Observation{State: StateExited, InstanceID: m.observation.InstanceID}
+	instanceID := m.observation.InstanceID
+	m.observation = Observation{State: StateExited, InstanceID: instanceID}
 	if code := cmd.ProcessState.ExitCode(); code >= 0 {
 		m.observation.ExitCode = code
 		m.observation.ExitCodeKnown = true
@@ -267,5 +297,25 @@ func (m *Manager) wait(cmd *exec.Cmd, done chan struct{}) {
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
 		m.observation.WaitError = err
+	}
+	events := m.exitEventsLocked()
+	m.mu.Unlock()
+	close(done)
+
+	// Ownership and exact exit observation are already published. A slow or
+	// absent recovery consumer must never hold up Wait/reap completion.
+	select {
+	case events <- ExitEvent{InstanceID: instanceID}:
+	default:
+		// Only one child can be owned at a time. Prefer retaining the newest
+		// exact exit if the consumer has not drained an older notification.
+		select {
+		case <-events:
+		default:
+		}
+		select {
+		case events <- ExitEvent{InstanceID: instanceID}:
+		default:
+		}
 	}
 }

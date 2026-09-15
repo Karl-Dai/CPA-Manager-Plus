@@ -37,6 +37,7 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 		wantVersion  model.CPAObservedVersion
 		wantCaps     model.RuntimeCapabilities
 		wantSupports model.RuntimeCapability
+		wantRecovery *model.RuntimeRecoveryObservation
 	}{
 		{
 			name:      "unknown before CPA observation",
@@ -54,10 +55,11 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 		},
 		{
 			name:         "ready with no safe observed version",
-			response:     `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"","capabilities":["start","stop","restart"]}`,
+			response:     `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"","capabilities":["start","stop","restart"],"recovery":{"state":"armed","attemptsRemaining":2}}`,
 			wantState:    model.RuntimeStateReady,
 			wantCaps:     model.RuntimeCapabilities{"start", "stop", "restart"},
 			wantSupports: "restart",
+			wantRecovery: &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateArmed, AttemptsRemaining: 2},
 		},
 		{
 			name:      "ready with version omitted",
@@ -117,6 +119,9 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 			}
 			if !reflect.DeepEqual(status.Capabilities, test.wantCaps) {
 				t.Fatalf("Status() capabilities = %#v, want %#v", status.Capabilities, test.wantCaps)
+			}
+			if !reflect.DeepEqual(status.Recovery, test.wantRecovery) {
+				t.Fatalf("Status() recovery = %#v, want %#v", status.Recovery, test.wantRecovery)
 			}
 			if test.wantSupports != "" && !status.Capabilities.Supports(test.wantSupports) {
 				t.Fatalf("Status() capabilities do not support %q", test.wantSupports)
@@ -209,6 +214,8 @@ func TestEmbeddedClientStatusRejectsInvalidProtocolResponse(t *testing.T) {
 		{name: "missing generation", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","state":"unknown","capabilities":[]}`},
 		{name: "unsupported protocol version", response: `{"protocolVersion":"v2","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"unknown","capabilities":[]}`},
 		{name: "invalid runtime state", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"broken","capabilities":[]}`},
+		{name: "invalid recovery state", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","capabilities":[],"recovery":{"state":"retrying","attemptsRemaining":1}}`},
+		{name: "invalid recovery attempts", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","capabilities":[],"recovery":{"state":"armed","attemptsRemaining":4}}`},
 	}
 
 	for _, test := range tests {

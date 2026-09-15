@@ -459,6 +459,8 @@ func (p *fakeProcess) PrepareStop() (cpaprocess.StopTarget, error) {
 	return &fakeStopTarget{process: p}, nil
 }
 
+func (p *fakeProcess) ExitEvents() <-chan cpaprocess.ExitEvent { return nil }
+
 type fakeStopTarget struct {
 	process  *fakeProcess
 	released bool

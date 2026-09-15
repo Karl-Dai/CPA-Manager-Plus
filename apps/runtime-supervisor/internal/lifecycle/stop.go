@@ -37,6 +37,7 @@ func (e *Executor) Stop(ctx context.Context, request StopRequest) (journal.Opera
 	}
 	operation, found, err := e.journal.Resolve(ctx, e.authority, intent)
 	if err != nil {
+		e.manualRecoveryForPersistenceError(err)
 		return journal.Operation{}, submissionError(err)
 	}
 	if found {
@@ -55,6 +56,7 @@ func (e *Executor) Stop(ctx context.Context, request StopRequest) (journal.Opera
 
 	operation, created, err := e.journal.Begin(ctx, e.authority, intent)
 	if err != nil {
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return journal.Operation{}, submissionError(err)
 	}
 	if !created {
@@ -67,8 +69,12 @@ func (e *Executor) Stop(ctx context.Context, request StopRequest) (journal.Opera
 	executionCtx := context.Background()
 	operation, err = e.journal.MarkRunning(executionCtx, e.authority.RuntimeIdentity, intent.OperationID)
 	if err != nil {
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return journal.Operation{}, fmt.Errorf("%w: %w", ErrPersistenceUnavailable, err)
 	}
+	// Durable running evidence establishes this as an expected termination.
+	// Disarm before touching the exact child so its Wait event cannot respawn.
+	e.disableRecovery(RecoveryStateInactive)
 	_, stopErr := target.Terminate(executionCtx)
 	state, failureCode := journal.StateSucceeded, ""
 	if stopErr != nil {
@@ -78,6 +84,7 @@ func (e *Executor) Stop(ctx context.Context, request StopRequest) (journal.Opera
 	if err != nil {
 		// The exact target may already be reaped. Retained running evidence
 		// prevents replay from terminating a current or later child.
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return operation, fmt.Errorf("%w: record result: %w", ErrExecutionFailed, err)
 	}
 	if stopErr != nil {
