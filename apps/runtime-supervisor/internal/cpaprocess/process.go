@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -19,8 +21,9 @@ var (
 )
 
 // StartSpec supplies an executable and literal arguments, never a shell command.
-// The child inherits the Supervisor's environment and working directory. Standard
-// input/output/error use os/exec's null-device defaults; no logs are collected.
+// The child keeps the working directory but receives only the OS environment
+// allowlist below, never arbitrary Supervisor configuration or credentials.
+// Standard input/output/error use os/exec's null-device defaults; no logs are collected.
 type StartSpec struct {
 	Executable string
 	Args       []string
@@ -83,6 +86,7 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	}
 
 	cmd := exec.Command(spec.Executable, spec.Args...)
+	cmd.Env = childEnvironment(os.Environ(), runtime.GOOS == "windows")
 	if err := ctx.Err(); err != nil {
 		return m.observeLocked(), err
 	}
@@ -93,6 +97,36 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	m.observation = Observation{State: StateRunning, PID: cmd.Process.Pid}
 	go m.wait(cmd)
 	return m.observation, nil
+}
+
+// childEnvironment keeps only executable search, home and temporary-directory
+// settings, plus Windows system directories. All application/private variables
+// require a future explicit provisioning contract; none are inherited by default.
+func childEnvironment(parent []string, windows bool) []string {
+	// A nil Cmd.Env would silently restore full Supervisor environment inheritance.
+	env := make([]string, 0, len(parent))
+	for _, entry := range parent {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if windows {
+			key = strings.ToUpper(key)
+		}
+		var allowed bool
+		switch key {
+		case "PATH", "TMP", "TEMP":
+			allowed = true
+		case "HOME", "TMPDIR":
+			allowed = !windows
+		case "SYSTEMROOT", "WINDIR", "USERPROFILE", "HOMEDRIVE", "HOMEPATH":
+			allowed = windows
+		}
+		if allowed {
+			env = append(env, entry)
+		}
+	}
+	return env
 }
 
 // Observe returns a snapshot. Running means spawn succeeded and exit has not

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -195,13 +196,94 @@ func TestArgumentsRemainLiteral(t *testing.T) {
 	waitFor(t, func() bool { return len(child.starts(t)) == 1 })
 	child.release(t)
 	assertExit(t, waitForExit(t, &manager), 0)
-	encoded, err := os.ReadFile(filepath.Join(child.dir, "starts", strconv.Itoa(started.PID)))
-	if err != nil {
-		t.Fatal(err)
+	if got := child.report(t, started.PID).Args; !reflect.DeepEqual(got, want) {
+		t.Fatalf("child arguments = %q, want %q", got, want)
 	}
-	var got []string
-	if err := json.Unmarshal(encoded, &got); err != nil || !reflect.DeepEqual(got, want) {
-		t.Fatalf("child arguments = %q, error = %v", got, err)
+}
+
+func TestStartDoesNotInheritSupervisorEnvironment(t *testing.T) {
+	var manager Manager
+	child := newHelper(t, &manager, 0)
+	private := []string{
+		"CPAMP_RUNTIME_TOKEN", "CPAMP_RUNTIME_JOURNAL_PATH", "CPAMP_RUNTIME_IDENTITY",
+		"CPAMP_RUNTIME_ADDR", "CPAMP_RUNTIME_GENERATION", "CPAMP_CPA_EXECUTABLE",
+		"CPAMP_START_TEST_HELPER", "UNRELATED_PARENT_CREDENTIAL", "HTTP_PROXY",
+	}
+	for _, key := range private {
+		t.Setenv(key, "test-only-private-value")
+	}
+	allowed := []string{"PATH", "TMP", "TEMP"}
+	if runtime.GOOS == "windows" {
+		allowed = append(allowed, "USERPROFILE")
+	} else {
+		allowed = append(allowed, "HOME", "TMPDIR")
+	}
+	for _, key := range allowed {
+		t.Setenv(key, child.dir)
+	}
+	started := startHelper(t, &manager, child)
+	waitFor(t, func() bool { return len(child.starts(t)) == 1 })
+	child.release(t)
+	assertExit(t, waitForExit(t, &manager), 0)
+	report := child.report(t, started.PID)
+	for _, key := range private {
+		if _, found := report.Environment[key]; found {
+			t.Errorf("CPA child inherited private environment variable %s", key)
+		}
+	}
+	for _, key := range allowed {
+		if !report.Environment[key] {
+			t.Errorf("CPA child did not preserve allowed environment variable %s", key)
+		}
+	}
+}
+
+func TestChildEnvironmentAllowlist(t *testing.T) {
+	tests := []struct {
+		name    string
+		windows bool
+		parent  []string
+		want    []string
+	}{
+		{
+			name: "Unix names are case sensitive",
+			parent: []string{
+				"PATH=/bin", "HOME=/home/cpa", "TMPDIR=/tmp/cpa", "TMP=", "TEMP=/tmp/with=equals",
+				"Path=/other", "home=/other", "SystemRoot=/other", "USERPROFILE=/other",
+				"CPAMP_RUNTIME_TOKEN=secret", "cpamp_runtime_token=secret", "HOME_TOKEN=secret",
+				"FUTURE_PRIVATE_SETTING=secret", "HTTP_PROXY=secret", "LD_PRELOAD=secret", "malformed",
+			},
+			want: []string{"PATH=/bin", "HOME=/home/cpa", "TMPDIR=/tmp/cpa", "TMP=", "TEMP=/tmp/with=equals"},
+		},
+		{
+			name:    "Windows names are case insensitive",
+			windows: true,
+			parent: []string{
+				`Path=C:\bin`, `SystemRoot=C:\Windows`, `wInDiR=C:\Windows`, `UserProfile=C:\Users\cpa`,
+				`HomeDrive=C:`, `HomePath=\Users\cpa`, `tMp=C:\tmp`, `TeMp=C:\temp`,
+				"HOME=other", "TMPDIR=other", "CpAmP_RuNtImE_ToKeN=secret", "Path_TOKEN=secret",
+				"FUTURE_PRIVATE_SETTING=secret", "HTTP_PROXY=secret", `=C:=C:\private`,
+			},
+			want: []string{
+				`Path=C:\bin`, `SystemRoot=C:\Windows`, `wInDiR=C:\Windows`, `UserProfile=C:\Users\cpa`,
+				`HomeDrive=C:`, `HomePath=\Users\cpa`, `tMp=C:\tmp`, `TeMp=C:\temp`,
+			},
+		},
+		{name: "empty Unix environment", want: []string{}},
+		{name: "empty Windows environment", windows: true, want: []string{}},
+		{name: "only private Unix variables", parent: []string{"CPAMP_RUNTIME_TOKEN=secret"}, want: []string{}},
+		{name: "only private Windows variables", windows: true, parent: []string{"cpamp_runtime_token=secret"}, want: []string{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := childEnvironment(test.parent, test.windows)
+			if got == nil {
+				t.Fatal("nil child environment would restore full Supervisor inheritance")
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("child environment = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -249,6 +331,13 @@ type helperChild struct {
 	dir  string
 }
 
+type helperReport struct {
+	Args []string
+	// Record names and whether the value equals the fixture directory, never
+	// arbitrary environment values that could contain Supervisor credentials.
+	Environment map[string]bool
+}
+
 func newHelper(t *testing.T, manager *Manager, code int) helperChild {
 	t.Helper()
 	executable, err := os.Executable()
@@ -288,6 +377,19 @@ func (child helperChild) starts(t *testing.T) []os.DirEntry {
 		t.Fatal(err)
 	}
 	return entries
+}
+
+func (child helperChild) report(t *testing.T, pid int) helperReport {
+	t.Helper()
+	encoded, err := os.ReadFile(filepath.Join(child.dir, "starts", strconv.Itoa(pid)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report helperReport
+	if err := json.Unmarshal(encoded, &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
 }
 
 func (child helperChild) release(t *testing.T) {
@@ -331,7 +433,15 @@ func TestCPAProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(96)
 	}
-	encoded, err := json.Marshal(os.Args[separator+4:])
+	report := helperReport{Args: os.Args[separator+4:], Environment: make(map[string]bool)}
+	for _, entry := range os.Environ() {
+		key, value, _ := strings.Cut(entry, "=")
+		if runtime.GOOS == "windows" {
+			key = strings.ToUpper(key)
+		}
+		report.Environment[key] = value == dir
+	}
+	encoded, err := json.Marshal(report)
 	if err != nil {
 		os.Exit(96)
 	}

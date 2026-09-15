@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,10 +18,22 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 )
 
-// The locally configured executable receives no HTTP-controlled arguments.
-// A test-only inherited environment selects a bounded helper instead of tests.
+const startHelperName = "cpamp-start-test-child.exe"
+
+// A private copy of the test executable selects the helper by filename. The
+// configured executable needs neither arguments nor inherited environment.
 func TestMain(m *testing.M) {
-	if directory := os.Getenv("CPAMP_START_TEST_HELPER"); directory != "" {
+	if executable, err := os.Executable(); err == nil && filepath.Base(executable) == startHelperName {
+		directory := filepath.Dir(executable)
+		var names []string
+		for _, entry := range os.Environ() {
+			name, _, _ := strings.Cut(entry, "=")
+			names = append(names, name)
+		}
+		// Only names are evidence; never serialize inherited credential values.
+		if err := os.WriteFile(filepath.Join(directory, "environment-names"), []byte(strings.Join(names, "\n")), 0o600); err != nil {
+			os.Exit(96)
+		}
 		file, err := os.OpenFile(filepath.Join(directory, "spawns"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			os.Exit(96)
@@ -77,11 +90,16 @@ func TestRuntimeStartupFailsIfJournalCannotOpen(t *testing.T) {
 
 func TestRuntimeStartEndToEnd(t *testing.T) {
 	directory := t.TempDir()
-	t.Setenv("CPAMP_START_TEST_HELPER", directory)
-	cfg := loadTestConfig(t, fixedGeneration(41))
-	cfg.journalPath = filepath.Join(directory, "runtime", "operations.sqlite")
-	var err error
-	cfg.cpaExecutable, err = os.Executable()
+	values := validConfigValues()
+	values["CPAMP_RUNTIME_ADDR"] = "127.0.0.1:18318"
+	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
+	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
+	values["CPAMP_START_TEST_HELPER"] = "must-not-be-inherited"
+	values["UNRELATED_PARENT_CREDENTIAL"] = "test-only-private-value"
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+	cfg, err := loadConfig(os.Getenv, fixedGeneration(41))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +213,44 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 	awaitSpawnCount(t, directory, 2)
 }
 
+func copyStartHelper(t *testing.T, directory string) string {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	name := filepath.Join(directory, startHelperName)
+	destination, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, copyErr := io.Copy(destination, source)
+	if err := errors.Join(copyErr, destination.Close()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.WriteFile(filepath.Join(directory, "exit"), nil, 0o600)
+		// Windows retains an executable file until the child actually exits.
+		for deadline := time.Now().Add(10 * time.Second); ; {
+			err := os.Remove(name)
+			if err == nil || os.IsNotExist(err) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("remove helper executable: %v", err)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+	return name
+}
+
 func startBody(id string, generation uint64) string {
 	return fmt.Sprintf(`{"operationId":%q,"expectedRuntimeIdentity":"runtime-01","expectedRuntimeGeneration":%d}`, id, generation)
 }
@@ -217,6 +273,16 @@ func awaitSpawnCount(t *testing.T, directory string, count int) {
 				t.Fatalf("spawn count = %d, want %d", got, count)
 			}
 			if got == count {
+				names, err := os.ReadFile(filepath.Join(directory, "environment-names"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range strings.Fields(string(names)) {
+					name = strings.ToUpper(name)
+					if strings.HasPrefix(name, "CPAMP_") || name == "UNRELATED_PARENT_CREDENTIAL" {
+						t.Errorf("typed Start passed private environment variable %s to CPA", name)
+					}
+				}
 				return
 			}
 		}
