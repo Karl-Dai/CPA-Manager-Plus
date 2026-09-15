@@ -90,5 +90,51 @@
       }
     },
     "digest": "sha256:6662fe09faef48144e4ee4e26aed51d227610fca0e97261a1db1ddbd53076d15"
+  },
+  "v1.12.13": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.12.13",
+        "stage": "stable",
+        "source_commit": "1fd9df3a383fd4607a7b23958125b58efd8dc1bf"
+      },
+      "content": {
+        "summary": {
+          "zh": "修复 xAI 周额度、手动模型价格同步与带前缀模型禁用，并加强 UsageEvent 凭证持久化安全与旧 JSONL 导入兼容。",
+          "en": "Fixes xAI weekly quota, manual price sync and prefixed model exclusions, while hardening UsageEvent credential persistence and legacy JSONL import compatibility."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.12.13/docs/release-notes/v1.12.13-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.12.13/docs/release-notes/v1.12.13-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.12.13"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.12.13"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.12.13_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.12.13_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.12.13_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.12.13_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.12.13_windows_amd64.zip",
+            "cpa-manager-plus_v1.12.13_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": null
+      }
+    },
+    "digest": "sha256:16d655326333d4934e31b4b3d46fb4da3c4526b25959b94f09e1e260e5497f8b"
   }
 }

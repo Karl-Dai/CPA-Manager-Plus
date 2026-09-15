@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "revision": 2,
-  "generated_at": "2026-09-11T11:40:19.213Z",
+  "revision": 3,
+  "generated_at": "2026-09-15T04:38:08.982Z",
   "channels": {
     "stable": {
-      "version": "v1.12.12"
+      "version": "v1.12.13"
     },
     "rc": {
-      "version": "v1.12.12"
+      "version": "v1.12.13"
     },
     "beta": {
-      "version": "v1.12.12"
+      "version": "v1.12.13"
     }
   }
 }
