@@ -54,6 +54,34 @@ func (s RuntimeState) IsValid() bool {
 // imply a safe version source or an expected-version operation precondition.
 type CPAObservedVersion string
 
+// RuntimeRecoveryState observes the Embedded Supervisor's process-local
+// bounded recovery policy. It does not express Manager desired state.
+type RuntimeRecoveryState string
+
+const (
+	RuntimeRecoveryStateInactive           RuntimeRecoveryState = "inactive"
+	RuntimeRecoveryStateArmed              RuntimeRecoveryState = "armed"
+	RuntimeRecoveryStateRecovering         RuntimeRecoveryState = "recovering"
+	RuntimeRecoveryStateManualIntervention RuntimeRecoveryState = "manual_intervention"
+)
+
+func (s RuntimeRecoveryState) IsValid() bool {
+	switch s {
+	case RuntimeRecoveryStateInactive,
+		RuntimeRecoveryStateArmed,
+		RuntimeRecoveryStateRecovering,
+		RuntimeRecoveryStateManualIntervention:
+		return true
+	default:
+		return false
+	}
+}
+
+type RuntimeRecoveryObservation struct {
+	State             RuntimeRecoveryState
+	AttemptsRemaining int
+}
+
 type RuntimeCapability string
 
 type RuntimeCapabilities []RuntimeCapability
@@ -80,6 +108,7 @@ type RuntimeObservedStatus struct {
 	State              RuntimeState
 	CPAObservedVersion CPAObservedVersion
 	Capabilities       RuntimeCapabilities
+	Recovery           *RuntimeRecoveryObservation
 }
 
 func (s RuntimeObservedStatus) Validate() error {
@@ -101,6 +130,14 @@ func (s RuntimeObservedStatus) Validate() error {
 	for _, capability := range s.Capabilities {
 		if strings.TrimSpace(string(capability)) == "" {
 			return errors.New("runtime capability must not be empty")
+		}
+	}
+	if s.Recovery != nil {
+		if !s.Recovery.State.IsValid() {
+			return fmt.Errorf("invalid runtime recovery state %q", s.Recovery.State)
+		}
+		if s.Recovery.AttemptsRemaining < 0 || s.Recovery.AttemptsRemaining > 3 {
+			return fmt.Errorf("runtime recovery attempts remaining must be between 0 and 3")
 		}
 	}
 	return nil

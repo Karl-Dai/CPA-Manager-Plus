@@ -38,6 +38,10 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 		State:              RuntimeStateReady,
 		CPAObservedVersion: "v7.1.18",
 		Capabilities:       RuntimeCapabilities{"status"},
+		Recovery: &RuntimeRecoveryObservation{
+			State:             RuntimeRecoveryStateArmed,
+			AttemptsRemaining: 3,
+		},
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid status: %v", err)
@@ -88,6 +92,15 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 		},
 		"empty capability": func(status *RuntimeObservedStatus) {
 			status.Capabilities = RuntimeCapabilities{"status", " "}
+		},
+		"invalid recovery state": func(status *RuntimeObservedStatus) {
+			status.Recovery = &RuntimeRecoveryObservation{State: "retrying", AttemptsRemaining: 1}
+		},
+		"negative recovery attempts": func(status *RuntimeObservedStatus) {
+			status.Recovery = &RuntimeRecoveryObservation{State: RuntimeRecoveryStateRecovering, AttemptsRemaining: -1}
+		},
+		"excess recovery attempts": func(status *RuntimeObservedStatus) {
+			status.Recovery = &RuntimeRecoveryObservation{State: RuntimeRecoveryStateArmed, AttemptsRemaining: 4}
 		},
 	}
 	for name, mutate := range tests {

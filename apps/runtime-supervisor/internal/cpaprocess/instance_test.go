@@ -6,7 +6,61 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestConfirmedExitEventCarriesExactReapedInstance(t *testing.T) {
+	t.Parallel()
+	var manager Manager
+	events := manager.ExitEvents()
+	child := newHelper(t, &manager, 0)
+	started := startHelper(t, &manager, child)
+	child.release(t)
+	exited := waitForExit(t, &manager)
+	select {
+	case event := <-events:
+		if event.InstanceID != started.InstanceID || event.InstanceID != exited.InstanceID {
+			t.Fatalf("exit event = %+v, started/exited = %+v / %+v", event, started, exited)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("confirmed Wait/reap did not publish an exit event")
+	}
+}
+
+func TestDelayedOlderExitPublisherCannotReplaceNewerExit(t *testing.T) {
+	t.Parallel()
+	var manager Manager
+	manager.mu.Lock()
+	events := manager.exitEventsLocked()
+	manager.mu.Unlock()
+	olderWaiting := make(chan struct{})
+	releaseOlder := make(chan struct{})
+	olderPublished := make(chan struct{})
+	go func() {
+		close(olderWaiting)
+		<-releaseOlder
+		manager.publishConfirmedExit(events, ExitEvent{InstanceID: 1})
+		close(olderPublished)
+	}()
+	<-olderWaiting
+
+	// B exits and publishes while A's older Wait publisher is delayed.
+	manager.publishConfirmedExit(events, ExitEvent{InstanceID: 2})
+	close(releaseOlder)
+	select {
+	case <-olderPublished:
+	case <-time.After(time.Second):
+		t.Fatal("delayed older publisher did not finish")
+	}
+	select {
+	case event := <-events:
+		if event.InstanceID != 2 {
+			t.Fatalf("coalesced exit = %+v, want newest instance 2", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("coalesced exit was lost")
+	}
+}
 
 func TestChildInstanceCorrelatesSpawnAndReapWithoutReuse(t *testing.T) {
 	t.Parallel()

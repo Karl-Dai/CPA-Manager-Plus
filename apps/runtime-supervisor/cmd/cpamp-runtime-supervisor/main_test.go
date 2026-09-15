@@ -425,12 +425,18 @@ func TestServeForcesCloseAfterShutdownTimeout(t *testing.T) {
 }
 
 type runtimeResponse struct {
-	ProtocolVersion    string   `json:"protocolVersion"`
-	RuntimeIdentity    string   `json:"runtimeIdentity"`
-	RuntimeGeneration  uint64   `json:"runtimeGeneration"`
-	State              string   `json:"state"`
-	CPAObservedVersion string   `json:"cpaObservedVersion"`
-	Capabilities       []string `json:"capabilities"`
+	ProtocolVersion    string                   `json:"protocolVersion"`
+	RuntimeIdentity    string                   `json:"runtimeIdentity"`
+	RuntimeGeneration  uint64                   `json:"runtimeGeneration"`
+	State              string                   `json:"state"`
+	CPAObservedVersion string                   `json:"cpaObservedVersion"`
+	Capabilities       []string                 `json:"capabilities"`
+	Recovery           *runtimeRecoveryResponse `json:"recovery"`
+}
+
+type runtimeRecoveryResponse struct {
+	State             string `json:"state"`
+	AttemptsRemaining int    `json:"attemptsRemaining"`
 }
 
 func validConfigValues() map[string]string {
@@ -593,6 +599,8 @@ func (p *shutdownProcess) Start(ctx context.Context, _ cpaprocess.StartSpec) (cp
 func (p *shutdownProcess) PrepareStop() (cpaprocess.StopTarget, error) {
 	return nil, cpaprocess.ErrStateConflict
 }
+
+func (p *shutdownProcess) ExitEvents() <-chan cpaprocess.ExitEvent { return nil }
 
 func (p *shutdownProcess) startCount() int {
 	p.mu.Lock()

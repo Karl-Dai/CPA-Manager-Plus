@@ -128,6 +128,17 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 				(wantState == "" && got.State != "offline" && got.State != "starting")) {
 				t.Fatalf("unexpected readiness: %+v, want %q", got, wantState)
 			}
+			if path == "/v1/runtime/status" {
+				if got.Recovery == nil || got.Recovery.AttemptsRemaining < 0 || got.Recovery.AttemptsRemaining > 3 {
+					t.Fatalf("invalid recovery observation: %+v", got)
+				}
+				if wantState == "offline" && (got.Recovery.State != "inactive" || got.Recovery.AttemptsRemaining != 0) {
+					t.Fatalf("fresh Supervisor restored a recovery lease: %+v", got)
+				}
+				if wantState == "starting" && (got.Recovery.State != "armed" || got.Recovery.AttemptsRemaining != 3) {
+					t.Fatalf("durably succeeded Start did not arm recovery: %+v", got)
+				}
+			}
 		}
 	}
 	assertRuntime(handler, 41, "offline")
@@ -221,6 +232,98 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 		t.Fatalf("cross-generation replay = %d, %s", replay.Code, replay.Body.String())
 	}
 	awaitSpawnCount(t, directory, 2)
+}
+
+func TestConfiguredRuntimeStatusStartsWithInactiveRecoveryLease(t *testing.T) {
+	directory := t.TempDir()
+	cfg := loadTestConfig(t, fixedGeneration(41))
+	cfg.journalPath = filepath.Join(directory, "runtime", "operations.sqlite")
+	cfg.cpaExecutable = filepath.Join(directory, "not-started-cpa")
+	cfg.cpaAddr = unreadyCPAAddr(t)
+	handler, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+
+	status := requestRuntime(t, handler, "/v1/runtime/status")
+	if status.State != "offline" || status.Recovery == nil || status.Recovery.State != "inactive" ||
+		status.Recovery.AttemptsRemaining != 0 || !reflect.DeepEqual(status.Capabilities, []string{"start", "stop", "restart"}) {
+		t.Fatalf("startup status = %+v", status)
+	}
+	handshake := requestRuntime(t, handler, "/v1/runtime/handshake")
+	if handshake.Recovery != nil {
+		t.Fatalf("handshake exposed recovery observation: %+v", handshake)
+	}
+}
+
+func TestRuntimeAutomaticallyRecoversConfirmedUnexpectedExit(t *testing.T) {
+	directory := t.TempDir()
+	values := validConfigValues()
+	values["CPAMP_RUNTIME_CPA_ADDR"] = unreadyCPAAddr(t)
+	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
+	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
+	values["NORMAL_SENTINEL"] = "test-only-ordinary-value"
+	values["CPAMP_DEPLOYMENT_SENTINEL"] = "test-only-deployment-value"
+	values["HTTP_PROXY"] = "http://http-proxy.invalid:18080"
+	values["HTTPS_PROXY"] = "http://https-proxy.invalid:18443"
+	values["NO_PROXY"] = "bypass.invalid"
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+	cfg, err := loadConfig(os.Getenv, fixedGeneration(41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+
+	if started := runtimeStart(handler, t.Context(), "start", 41); started.Code != http.StatusOK {
+		t.Fatalf("Start = %d, %s", started.Code, started.Body.String())
+	}
+	awaitSpawnCount(t, directory, 1)
+	exitFile := filepath.Join(directory, "exit")
+	if err := os.WriteFile(exitFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		status := requestRuntime(t, handler, "/v1/runtime/status")
+		if status.State == "offline" && status.Recovery != nil && status.Recovery.State == "recovering" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unexpected exit was not scheduled for recovery: %+v", status)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.Remove(exitFile); err != nil {
+		t.Fatal(err)
+	}
+	awaitSpawnCount(t, directory, 2)
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		status := requestRuntime(t, handler, "/v1/runtime/status")
+		if status.Recovery != nil && status.Recovery.State == "armed" && status.Recovery.AttemptsRemaining == 2 {
+			if status.State != "starting" || status.RuntimeGeneration != 41 ||
+				!reflect.DeepEqual(status.Capabilities, []string{"start", "stop", "restart"}) {
+				t.Fatalf("recovered Runtime changed availability contract: %+v", status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("automatic replacement did not arm remaining budget: %+v", status)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if stopped := runtimeStop(handler, t.Context(), "cleanup-stop", 41); stopped.Code != http.StatusOK {
+		t.Fatalf("Stop recovered child = %d, %s", stopped.Code, stopped.Body.String())
+	}
+	status := requestRuntime(t, handler, "/v1/runtime/status")
+	if status.Recovery == nil || status.Recovery.State != "inactive" || status.Recovery.AttemptsRemaining != 0 {
+		t.Fatalf("Stop did not disarm recovery: %+v", status)
+	}
 }
 
 func TestRuntimeStopEndToEndKeepsReplayAwayFromReplacementChild(t *testing.T) {

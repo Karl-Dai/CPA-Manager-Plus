@@ -65,6 +65,7 @@ type process interface {
 	Observe() cpaprocess.Observation
 	Start(context.Context, cpaprocess.StartSpec) (cpaprocess.Observation, error)
 	PrepareStop() (cpaprocess.StopTarget, error)
+	ExitEvents() <-chan cpaprocess.ExitEvent
 }
 
 // Executor owns the shared Start/Stop/Restart serialization and resources for
@@ -79,6 +80,18 @@ type Executor struct {
 	closed     atomic.Bool
 	closeOnce  sync.Once
 	closeErr   error
+
+	recoveryMu             sync.Mutex
+	recoveryContext        context.Context
+	cancelRecovery         context.CancelFunc
+	recoveryWorkers        sync.WaitGroup
+	recoveryEpoch          uint64
+	recoveryState          RecoveryState
+	recoveryAttempts       int
+	recoveryInstanceID     uint64
+	cancelRecoveryTimer    context.CancelFunc
+	waitForRecoveryDelay   recoveryDelayWaiter
+	newRecoveryOperationID recoveryOperationIDSource
 }
 
 func NewExecutor(authority journal.Authority, store operationJournal, child process, executable string) (*Executor, error) {
@@ -88,7 +101,21 @@ func NewExecutor(authority journal.Authority, store operationJournal, child proc
 	if strings.TrimSpace(executable) == "" || strings.ContainsRune(executable, '\x00') {
 		return nil, errors.New("lifecycle mutations require a local CPA executable without NUL")
 	}
-	return &Executor{authority: authority, journal: store, process: child, executable: executable}, nil
+	recoveryContext, cancelRecovery := context.WithCancel(context.Background())
+	executor := &Executor{
+		authority:              authority,
+		journal:                store,
+		process:                child,
+		executable:             executable,
+		recoveryContext:        recoveryContext,
+		cancelRecovery:         cancelRecovery,
+		recoveryState:          RecoveryStateInactive,
+		waitForRecoveryDelay:   waitAutomaticRecoveryDelay,
+		newRecoveryOperationID: randomRecoveryOperationID,
+	}
+	executor.recoveryWorkers.Add(1)
+	go executor.observeConfirmedExits(child.ExitEvents())
+	return executor, nil
 }
 
 func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Operation, error) {
@@ -115,6 +142,7 @@ func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Ope
 	}
 	operation, found, err := e.journal.Resolve(ctx, e.authority, intent)
 	if err != nil {
+		// Resolve is read-only and cannot supersede existing recovery authority.
 		return journal.Operation{}, submissionError(err)
 	}
 	if found {
@@ -129,6 +157,7 @@ func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Ope
 	}
 	operation, created, err := e.journal.Begin(ctx, e.authority, intent)
 	if err != nil {
+		e.failRecoveryForAmbiguousBegin(err)
 		return journal.Operation{}, submissionError(err)
 	}
 	if !created {
@@ -141,9 +170,13 @@ func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Ope
 	executionCtx := context.Background()
 	operation, err = e.journal.MarkRunning(executionCtx, e.authority.RuntimeIdentity, intent.OperationID)
 	if err != nil {
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return journal.Operation{}, fmt.Errorf("%w: %w", ErrPersistenceUnavailable, err)
 	}
-	_, spawnErr := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.executable})
+	// A newly accepted explicit run supersedes any prior crash timer. Only its
+	// own durable terminal success may grant a fresh recovery epoch.
+	e.disableRecovery(RecoveryStateInactive)
+	started, spawnErr := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.executable})
 	state, failureCode := journal.StateSucceeded, ""
 	if spawnErr != nil {
 		state, failureCode = journal.StateFailed, "process_start_failed"
@@ -152,11 +185,14 @@ func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Ope
 	if err != nil {
 		// Spawn may already have succeeded. Never retry it or kill the child
 		// to compensate for missing terminal evidence.
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return operation, fmt.Errorf("%w: record result: %w", ErrExecutionFailed, err)
 	}
 	if spawnErr != nil {
+		e.disableRecovery(RecoveryStateInactive)
 		return result, fmt.Errorf("%w: %w", ErrExecutionFailed, spawnErr)
 	}
+	e.armFreshRecovery(started)
 	// Success means OS spawn and ownership publication, not Runtime readiness.
 	return result, nil
 }
@@ -176,7 +212,17 @@ func submissionError(err error) error {
 // execution gate. Submissions already queued on the gate recheck this state
 // before resolving or recording durable intent.
 func (e *Executor) CloseAdmission() {
-	e.closed.Store(true)
+	e.recoveryMu.Lock()
+	defer e.recoveryMu.Unlock()
+	if e.closed.Swap(true) {
+		return
+	}
+	// Cancel exit observation and pending delays immediately. disableRecovery
+	// shares this lock with automatic durable admission: an attempt already in
+	// that critical section may finish, while every later attempt sees closed
+	// before writing intent. Accepted work is drained by Close.
+	e.cancelRecovery()
+	e.disableRecoveryLocked(RecoveryStateInactive)
 }
 
 // Close drains any synchronous execution before closing the startup-owned
@@ -184,6 +230,7 @@ func (e *Executor) CloseAdmission() {
 // rejects later submissions and does not stop the CPA child.
 func (e *Executor) Close() error {
 	e.CloseAdmission()
+	e.recoveryWorkers.Wait()
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()

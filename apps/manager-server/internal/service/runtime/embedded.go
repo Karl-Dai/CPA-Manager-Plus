@@ -44,12 +44,18 @@ func NewEmbeddedClient(baseURL string, token string) *EmbeddedClient {
 }
 
 type embeddedStatusResponse struct {
-	ProtocolVersion    string   `json:"protocolVersion"`
-	RuntimeIdentity    string   `json:"runtimeIdentity"`
-	RuntimeGeneration  uint64   `json:"runtimeGeneration"`
-	State              string   `json:"state"`
-	CPAObservedVersion string   `json:"cpaObservedVersion"`
-	Capabilities       []string `json:"capabilities"`
+	ProtocolVersion    string                    `json:"protocolVersion"`
+	RuntimeIdentity    string                    `json:"runtimeIdentity"`
+	RuntimeGeneration  uint64                    `json:"runtimeGeneration"`
+	State              string                    `json:"state"`
+	CPAObservedVersion string                    `json:"cpaObservedVersion"`
+	Capabilities       []string                  `json:"capabilities"`
+	Recovery           *embeddedRecoveryResponse `json:"recovery"`
+}
+
+type embeddedRecoveryResponse struct {
+	State             string `json:"state"`
+	AttemptsRemaining int    `json:"attemptsRemaining"`
 }
 
 func (c *EmbeddedClient) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
@@ -95,6 +101,12 @@ func (c *EmbeddedClient) Status(ctx context.Context) (model.RuntimeObservedStatu
 		State:              model.RuntimeState(response.State),
 		CPAObservedVersion: model.CPAObservedVersion(response.CPAObservedVersion),
 		Capabilities:       capabilities,
+	}
+	if response.Recovery != nil {
+		status.Recovery = &model.RuntimeRecoveryObservation{
+			State:             model.RuntimeRecoveryState(response.Recovery.State),
+			AttemptsRemaining: response.Recovery.AttemptsRemaining,
+		}
 	}
 	if err := status.Validate(); err != nil {
 		return model.RuntimeObservedStatus{}, fmt.Errorf("validate embedded Runtime status: %w", err)

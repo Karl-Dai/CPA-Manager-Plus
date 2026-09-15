@@ -49,6 +49,7 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 	}
 	operation, found, err := e.journal.Resolve(ctx, e.authority, intent)
 	if err != nil {
+		// Resolve is read-only and cannot supersede existing recovery authority.
 		return journal.Operation{}, submissionError(err)
 	}
 	if found {
@@ -67,6 +68,7 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 
 	operation, created, err := e.journal.Begin(ctx, e.authority, intent)
 	if err != nil {
+		e.failRecoveryForAmbiguousBegin(err)
 		return journal.Operation{}, submissionError(err)
 	}
 	if !created {
@@ -80,8 +82,12 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 	executionCtx := context.Background()
 	operation, err = e.journal.MarkRunning(executionCtx, e.authority.RuntimeIdentity, intent.OperationID)
 	if err != nil {
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return journal.Operation{}, fmt.Errorf("%w: %w", ErrPersistenceUnavailable, err)
 	}
+	// The old child's termination is expected once running evidence is durable.
+	// Fence its exit before Terminate; only durable replacement success re-arms.
+	e.disableRecovery(RecoveryStateInactive)
 	if _, err := target.Terminate(executionCtx); err != nil {
 		return e.completeRestartFailure(executionCtx, operation, intent.OperationID, "process_restart_stop_failed", err)
 	}
@@ -89,15 +95,18 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 	// confirmed reap. Release is idempotent and makes that requirement explicit
 	// for alternative process implementations before replacement Start.
 	target.Release()
-	if _, err := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.executable}); err != nil {
+	started, err := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.executable})
+	if err != nil {
 		return e.completeRestartFailure(executionCtx, operation, intent.OperationID, "process_restart_start_failed", err)
 	}
 	result, err := e.journal.Complete(executionCtx, e.authority.RuntimeIdentity, intent.OperationID, journal.StateSucceeded, "")
 	if err != nil {
 		// The replacement may already be running. Never stop it or spawn again
 		// to compensate for missing terminal evidence.
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return operation, fmt.Errorf("%w: record result: %w", ErrExecutionFailed, err)
 	}
+	e.armFreshRecovery(started)
 	// Success means confirmed old-child reap plus replacement spawn and
 	// ownership publication, not Runtime readiness.
 	return result, nil
@@ -112,7 +121,9 @@ func (e *Executor) completeRestartFailure(
 ) (journal.Operation, error) {
 	result, err := e.journal.Complete(ctx, e.authority.RuntimeIdentity, operationID, journal.StateFailed, failureCode)
 	if err != nil {
+		e.disableRecovery(RecoveryStateManualIntervention)
 		return operation, fmt.Errorf("%w: record result: %w", ErrExecutionFailed, err)
 	}
+	e.disableRecovery(RecoveryStateInactive)
 	return result, fmt.Errorf("%w: %w", ErrExecutionFailed, executionErr)
 }

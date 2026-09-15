@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 )
 
@@ -25,19 +27,54 @@ func TestStatusObserverRunsOnlyAfterAuthentication(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			observations := 0
+			recoveryObservations := 0
 			h, err := NewHandler(Config{
 				RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, Token: testRuntimeToken,
 				Status: statusObserverFunc(func(context.Context) readiness.State {
 					observations++
 					return readiness.Ready
 				}),
+				Recovery: recoveryStatusObserverFunc(func() lifecycle.RecoveryStatus {
+					recoveryObservations++
+					return lifecycle.RecoveryStatus{State: lifecycle.RecoveryStateArmed, AttemptsRemaining: 3}
+				}),
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			response := request(t, h, test.method, test.path, test.token)
-			if response.Code != test.code || observations != test.observations {
-				t.Fatalf("HTTP %d, observations %d; want %d, %d", response.Code, observations, test.code, test.observations)
+			if response.Code != test.code || observations != test.observations || recoveryObservations != test.observations {
+				t.Fatalf("HTTP %d, observations %d/%d; want %d, %d", response.Code, observations, recoveryObservations, test.code, test.observations)
+			}
+		})
+	}
+}
+
+func TestStatusReportsRecoveryWithoutChangingAvailabilityOrCapabilities(t *testing.T) {
+	for _, recovery := range []lifecycle.RecoveryStatus{
+		{State: lifecycle.RecoveryStateInactive, AttemptsRemaining: 0},
+		{State: lifecycle.RecoveryStateArmed, AttemptsRemaining: 3},
+		{State: lifecycle.RecoveryStateRecovering, AttemptsRemaining: 2},
+		{State: lifecycle.RecoveryStateManualIntervention, AttemptsRemaining: 0},
+	} {
+		t.Run(string(recovery.State), func(t *testing.T) {
+			executor := lifecycleFunc{}
+			h, err := NewHandler(Config{
+				RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, Token: testRuntimeToken,
+				Start: executor, Stop: executor, Restart: executor,
+				Status:   statusObserverFunc(func(context.Context) readiness.State { return readiness.Ready }),
+				Recovery: recoveryStatusObserverFunc(func() lifecycle.RecoveryStatus { return recovery }),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := request(t, h, http.MethodGet, statusPath, testRuntimeToken)
+			var got statusResponse
+			decodeResponse(t, response, &got)
+			if response.Code != http.StatusOK || got.State != string(readiness.Ready) || got.Recovery == nil ||
+				got.Recovery.State != string(recovery.State) || got.Recovery.AttemptsRemaining != recovery.AttemptsRemaining ||
+				!reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) {
+				t.Fatalf("status response = %+v", got)
 			}
 		})
 	}
@@ -128,6 +165,10 @@ func TestStatusCallerCannotOverrideProbeOrForwardCredentials(t *testing.T) {
 type statusObserverFunc func(context.Context) readiness.State
 
 func (f statusObserverFunc) Observe(ctx context.Context) readiness.State { return f(ctx) }
+
+type recoveryStatusObserverFunc func() lifecycle.RecoveryStatus
+
+func (f recoveryStatusObserverFunc) RecoveryStatus() lifecycle.RecoveryStatus { return f() }
 
 type statusProcess struct{}
 
