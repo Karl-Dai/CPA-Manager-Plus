@@ -21,8 +21,8 @@ var (
 )
 
 // StartSpec supplies an executable and literal arguments, never a shell command.
-// The child keeps the working directory but receives only the OS environment
-// allowlist below, never arbitrary Supervisor configuration or credentials.
+// The child inherits the working directory and ordinary parent environment.
+// Supervisor-private environment variables are excluded at spawn.
 // Standard input/output/error use os/exec's null-device defaults; no logs are collected.
 type StartSpec struct {
 	Executable string
@@ -99,32 +99,20 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	return m.observation, nil
 }
 
-// childEnvironment keeps only executable search, home and temporary-directory
-// settings, plus Windows system directories. All application/private variables
-// require a future explicit provisioning contract; none are inherited by default.
+// childEnvironment strips the Supervisor-private namespace and executable
+// setting. Other entries retain their names, values and order.
 func childEnvironment(parent []string, windows bool) []string {
 	// A nil Cmd.Env would silently restore full Supervisor environment inheritance.
 	env := make([]string, 0, len(parent))
 	for _, entry := range parent {
-		key, _, ok := strings.Cut(entry, "=")
-		if !ok {
-			continue
-		}
+		key, _, _ := strings.Cut(entry, "=")
 		if windows {
 			key = strings.ToUpper(key)
 		}
-		var allowed bool
-		switch key {
-		case "PATH", "TMP", "TEMP":
-			allowed = true
-		case "HOME", "TMPDIR":
-			allowed = !windows
-		case "SYSTEMROOT", "WINDIR", "USERPROFILE", "HOMEDRIVE", "HOMEPATH":
-			allowed = windows
+		if strings.HasPrefix(key, "CPAMP_RUNTIME_") || key == "CPAMP_CPA_EXECUTABLE" {
+			continue
 		}
-		if allowed {
-			env = append(env, entry)
-		}
+		env = append(env, entry)
 	}
 	return env
 }

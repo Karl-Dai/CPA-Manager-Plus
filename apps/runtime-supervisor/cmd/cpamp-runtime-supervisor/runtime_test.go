@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -94,8 +95,12 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 	values["CPAMP_RUNTIME_ADDR"] = "127.0.0.1:18318"
 	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
 	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
-	values["CPAMP_START_TEST_HELPER"] = "must-not-be-inherited"
-	values["UNRELATED_PARENT_CREDENTIAL"] = "test-only-private-value"
+	values["CPAMP_RUNTIME_FUTURE_SECRET"] = "test-only-private-value"
+	values["NORMAL_SENTINEL"] = "test-only-ordinary-value"
+	values["CPAMP_DEPLOYMENT_SENTINEL"] = "test-only-deployment-value"
+	values["HTTP_PROXY"] = "http://http-proxy.invalid:18080"
+	values["HTTPS_PROXY"] = "http://https-proxy.invalid:18443"
+	values["NO_PROXY"] = "bypass.invalid"
 	for key, value := range values {
 		t.Setenv(key, value)
 	}
@@ -277,10 +282,19 @@ func awaitSpawnCount(t *testing.T, directory string, count int) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				inherited := make(map[string]bool)
 				for _, name := range strings.Fields(string(names)) {
-					name = strings.ToUpper(name)
-					if strings.HasPrefix(name, "CPAMP_") || name == "UNRELATED_PARENT_CREDENTIAL" {
+					if runtime.GOOS == "windows" {
+						name = strings.ToUpper(name)
+					}
+					inherited[name] = true
+					if strings.HasPrefix(name, "CPAMP_RUNTIME_") || name == "CPAMP_CPA_EXECUTABLE" {
 						t.Errorf("typed Start passed private environment variable %s to CPA", name)
+					}
+				}
+				for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "NORMAL_SENTINEL", "CPAMP_DEPLOYMENT_SENTINEL"} {
+					if !inherited[name] {
+						t.Errorf("typed Start dropped ordinary environment variable %s", name)
 					}
 				}
 				return
