@@ -50,6 +50,8 @@ func (s RuntimeState) IsValid() bool {
 	}
 }
 
+// CPAObservedVersion is an optional observed fact. Readiness alone does not
+// imply a safe version source or an expected-version operation precondition.
 type CPAObservedVersion string
 
 type RuntimeCapability string
@@ -95,9 +97,6 @@ func (s RuntimeObservedStatus) Validate() error {
 	}
 	if !s.State.IsValid() {
 		return fmt.Errorf("invalid runtime state %q", s.State)
-	}
-	if s.State == RuntimeStateReady && strings.TrimSpace(string(s.CPAObservedVersion)) == "" {
-		return errors.New("CPA observed version is required for a ready runtime")
 	}
 	for _, capability := range s.Capabilities {
 		if strings.TrimSpace(string(capability)) == "" {

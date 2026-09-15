@@ -42,6 +42,11 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid status: %v", err)
 	}
+	withoutVersion := valid
+	withoutVersion.CPAObservedVersion = ""
+	if err := withoutVersion.Validate(); err != nil {
+		t.Fatalf("ready status without a safe observed version: %v", err)
+	}
 
 	offline := valid
 	offline.State = RuntimeStateOffline
@@ -72,9 +77,6 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 		},
 		"invalid state": func(status *RuntimeObservedStatus) {
 			status.State = "stopping"
-		},
-		"ready without CPA version": func(status *RuntimeObservedStatus) {
-			status.CPAObservedVersion = ""
 		},
 		"identity without protocol": func(status *RuntimeObservedStatus) {
 			status.ProtocolVersion = ""

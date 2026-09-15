@@ -53,6 +53,26 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 			wantSupports: "capability-b",
 		},
 		{
+			name:         "ready with no safe observed version",
+			response:     `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"","capabilities":["start","stop","restart"]}`,
+			wantState:    model.RuntimeStateReady,
+			wantCaps:     model.RuntimeCapabilities{"start", "stop", "restart"},
+			wantSupports: "restart",
+		},
+		{
+			name:      "ready with version omitted",
+			response:  `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","capabilities":[]}`,
+			wantState: model.RuntimeStateReady,
+			wantCaps:  model.RuntimeCapabilities{},
+		},
+		{
+			name:        "nonempty observed version is preserved verbatim",
+			response:    `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":" custom build ","capabilities":[]}`,
+			wantState:   model.RuntimeStateReady,
+			wantVersion: " custom build ",
+			wantCaps:    model.RuntimeCapabilities{},
+		},
+		{
 			name:      "authoritative offline observation",
 			response:  `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"offline","cpaObservedVersion":"","capabilities":[]}`,
 			wantState: model.RuntimeStateOffline,
@@ -188,7 +208,6 @@ func TestEmbeddedClientStatusRejectsInvalidProtocolResponse(t *testing.T) {
 		{name: "missing identity", response: `{"protocolVersion":"v1","runtimeGeneration":7,"state":"unknown","capabilities":[]}`},
 		{name: "missing generation", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","state":"unknown","capabilities":[]}`},
 		{name: "unsupported protocol version", response: `{"protocolVersion":"v2","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"unknown","capabilities":[]}`},
-		{name: "ready without CPA version", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","capabilities":[]}`},
 		{name: "invalid runtime state", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"broken","capabilities":[]}`},
 	}
 

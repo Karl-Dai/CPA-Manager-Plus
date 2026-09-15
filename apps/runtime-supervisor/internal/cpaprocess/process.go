@@ -47,7 +47,10 @@ const (
 // If Wait cannot confirm termination, StateUnknown retains ownership and the
 // last observed PID, and subsequent Start calls fail closed.
 type Observation struct {
-	State         State
+	State State
+	// InstanceID correlates observations of one successful spawn within this
+	// Manager only. It is never persisted or exported as protocol authority.
+	InstanceID    uint64 `json:"-"`
 	PID           int
 	ExitCode      int
 	ExitCodeKnown bool
@@ -57,11 +60,12 @@ type Observation struct {
 // Manager owns at most one CPA child. Use one Manager per Supervisor incarnation.
 // Its zero value is ready to use; it must not be copied after first use.
 type Manager struct {
-	mu          sync.Mutex
-	cmd         *exec.Cmd
-	waitDone    chan struct{}
-	stopTarget  *exec.Cmd
-	observation Observation
+	mu           sync.Mutex
+	cmd          *exec.Cmd
+	waitDone     chan struct{}
+	stopTarget   *exec.Cmd
+	nextInstance uint64
+	observation  Observation
 }
 
 // StopTarget is an opaque reservation for the exact child owned when Stop was
@@ -93,6 +97,10 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	if m.cmd != nil || m.stopTarget != nil {
 		return m.observeLocked(), ErrStateConflict
 	}
+	// Never wrap and reuse an instance, even after a confirmed exit.
+	if m.nextInstance == ^uint64(0) {
+		return m.observeLocked(), ErrStateConflict
+	}
 	if strings.TrimSpace(spec.Executable) == "" || strings.ContainsRune(spec.Executable, '\x00') {
 		return m.observeLocked(), fmt.Errorf("%w: executable is required and must not contain NUL", ErrInvalidSpec)
 	}
@@ -112,7 +120,8 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	}
 	m.cmd = cmd
 	m.waitDone = make(chan struct{})
-	m.observation = Observation{State: StateRunning, PID: cmd.Process.Pid}
+	m.nextInstance++
+	m.observation = Observation{State: StateRunning, InstanceID: m.nextInstance, PID: cmd.Process.Pid}
 	go m.wait(cmd, m.waitDone)
 	return m.observation, nil
 }
@@ -250,7 +259,7 @@ func (m *Manager) wait(cmd *exec.Cmd, done chan struct{}) {
 	}
 	m.cmd = nil
 	m.waitDone = nil
-	m.observation = Observation{State: StateExited}
+	m.observation = Observation{State: StateExited, InstanceID: m.observation.InstanceID}
 	if code := cmd.ProcessState.ExitCode(); code >= 0 {
 		m.observation.ExitCode = code
 		m.observation.ExitCodeKnown = true

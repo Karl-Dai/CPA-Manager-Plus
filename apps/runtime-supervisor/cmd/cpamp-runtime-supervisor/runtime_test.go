@@ -93,6 +93,7 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 	directory := t.TempDir()
 	values := validConfigValues()
 	values["CPAMP_RUNTIME_ADDR"] = "127.0.0.1:18318"
+	values["CPAMP_RUNTIME_CPA_ADDR"] = unreadyCPAAddr(t)
 	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
 	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
 	values["CPAMP_RUNTIME_FUTURE_SECRET"] = "test-only-private-value"
@@ -115,17 +116,21 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 	t.Cleanup(func() { _ = handler.Close() })
 	exitFile := filepath.Join(directory, "exit")
 	t.Cleanup(func() { _ = os.WriteFile(exitFile, nil, 0o600) })
-	assertRuntime := func(h http.Handler, generation uint64) {
+	assertRuntime := func(h http.Handler, generation uint64, wantState string) {
 		t.Helper()
 		for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 			got := requestRuntime(t, h, path)
 			if got.RuntimeGeneration != generation || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
-				got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "unknown") {
-				t.Fatalf("Start changed authority or invented readiness: %+v", got)
+				got.CPAObservedVersion != "" {
+				t.Fatalf("Start changed authority or invented version: %+v", got)
+			}
+			if path == "/v1/runtime/status" && ((wantState != "" && got.State != wantState) ||
+				(wantState == "" && got.State != "offline" && got.State != "starting")) {
+				t.Fatalf("unexpected readiness: %+v, want %q", got, wantState)
 			}
 		}
 	}
-	assertRuntime(handler, 41)
+	assertRuntime(handler, 41, "offline")
 
 	// An unauthorized request cannot create intent or start the local executable.
 	req := httptest.NewRequest(http.MethodPost, "/v1/runtime/operations/start", strings.NewReader(startBody("unauthorized", 41)))
@@ -145,7 +150,7 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 	}
 	cancel()
 	awaitSpawnCount(t, directory, 1)
-	assertRuntime(handler, 41)
+	assertRuntime(handler, 41, "starting")
 	if replay := runtimeStart(handler, t.Context(), "first", 41); replay.Code != http.StatusOK || replay.Body.String() != w.Body.String() {
 		t.Fatalf("same-ID replay = %d, %s", replay.Code, replay.Body.String())
 	}
@@ -185,7 +190,7 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	awaitSpawnCount(t, directory, 2)
-	assertRuntime(handler, 41)
+	assertRuntime(handler, 41, "") // The released helper may already be reaped.
 	if err := handler.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +205,7 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = restarted.Close() })
-	assertRuntime(restarted, 42)
+	assertRuntime(restarted, 42, "offline")
 	if stale := runtimeStart(restarted, t.Context(), "first", 41); stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "stale_runtime_generation") {
 		t.Fatalf("stale replay = %d, %s", stale.Code, stale.Body.String())
 	}
@@ -221,6 +226,7 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 func TestRuntimeStopEndToEndKeepsReplayAwayFromReplacementChild(t *testing.T) {
 	directory := t.TempDir()
 	values := validConfigValues()
+	values["CPAMP_RUNTIME_CPA_ADDR"] = unreadyCPAAddr(t)
 	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
 	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
 	values["NORMAL_SENTINEL"] = "test-only-ordinary-value"
@@ -246,7 +252,7 @@ func TestRuntimeStopEndToEndKeepsReplayAwayFromReplacementChild(t *testing.T) {
 	for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 		got := requestRuntime(t, handler, path)
 		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
-			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "unknown") {
+			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "offline") {
 			t.Fatalf("configured lifecycle metadata = %+v", got)
 		}
 	}
@@ -329,6 +335,7 @@ func TestRuntimeStopEndToEndKeepsReplayAwayFromReplacementChild(t *testing.T) {
 func TestRuntimeRestartEndToEndReplacesOwnedChildExactlyOnce(t *testing.T) {
 	directory := t.TempDir()
 	values := validConfigValues()
+	values["CPAMP_RUNTIME_CPA_ADDR"] = unreadyCPAAddr(t)
 	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
 	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
 	values["NORMAL_SENTINEL"] = "test-only-ordinary-value"
@@ -375,7 +382,7 @@ func TestRuntimeRestartEndToEndReplacesOwnedChildExactlyOnce(t *testing.T) {
 	for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 		got := requestRuntime(t, handler, path)
 		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
-			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "unknown") {
+			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "starting") {
 			t.Fatalf("Restart changed authority or invented readiness: %+v", got)
 		}
 	}
