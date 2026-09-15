@@ -338,7 +338,7 @@ type startFixture struct {
 	path    string
 	journal *recordingJournal
 	child   *fakeProcess
-	starter *Starter
+	starter *Executor
 }
 
 func newStartFixture(t *testing.T) *startFixture {
@@ -350,7 +350,7 @@ func newStartFixture(t *testing.T) *startFixture {
 	}
 	f.journal = &recordingJournal{Store: store, events: &f.events}
 	f.child = &fakeProcess{events: &f.events, observation: cpaprocess.Observation{State: cpaprocess.StateNotStarted}}
-	f.starter, err = NewStarter(journal.Authority{RuntimeIdentity: "runtime-01", RuntimeGeneration: 41}, f.journal, f.child, "supervisor-local-cpa")
+	f.starter, err = NewExecutor(journal.Authority{RuntimeIdentity: "runtime-01", RuntimeGeneration: 41}, f.journal, f.child, "supervisor-local-cpa")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,10 @@ type fakeProcess struct {
 	events      *[]string
 	observation cpaprocess.Observation
 	starts      int
+	stops       int
 	onStart     func(context.Context, cpaprocess.StartSpec) error
+	onPrepare   func()
+	onStop      func(context.Context) error
 }
 
 func (p *fakeProcess) Observe() cpaprocess.Observation {
@@ -443,4 +446,42 @@ func (p *fakeProcess) Start(ctx context.Context, spec cpaprocess.StartSpec) (cpa
 	}
 	p.observation = cpaprocess.Observation{State: cpaprocess.StateRunning, PID: 123}
 	return p.observation, nil
+}
+
+func (p *fakeProcess) PrepareStop() (cpaprocess.StopTarget, error) {
+	*p.events = append(*p.events, "prepare-stop")
+	if p.onPrepare != nil {
+		p.onPrepare()
+	}
+	if p.observation.State != cpaprocess.StateRunning {
+		return nil, cpaprocess.ErrStateConflict
+	}
+	return &fakeStopTarget{process: p}, nil
+}
+
+type fakeStopTarget struct {
+	process  *fakeProcess
+	released bool
+}
+
+func (target *fakeStopTarget) Terminate(ctx context.Context) (cpaprocess.Observation, error) {
+	*target.process.events = append(*target.process.events, "terminate")
+	if target.process.observation.State == cpaprocess.StateExited {
+		return target.process.observation, nil
+	}
+	target.process.stops++
+	if target.process.onStop != nil {
+		if err := target.process.onStop(ctx); err != nil {
+			return target.process.observation, err
+		}
+	}
+	target.process.observation = cpaprocess.Observation{State: cpaprocess.StateExited}
+	return target.process.observation, nil
+}
+
+func (target *fakeStopTarget) Release() {
+	if target.released {
+		return
+	}
+	target.released = true
 }

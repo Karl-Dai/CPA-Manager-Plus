@@ -359,12 +359,123 @@ func TestSignalExitHasNoInventedExitCode(t *testing.T) {
 	}
 }
 
+func TestStopTerminatesExactOwnedChildAfterConfirmedReap(t *testing.T) {
+	t.Parallel()
+	var manager Manager
+	child := newHelper(t, &manager, 0)
+	startHelper(t, &manager, child)
+	waitFor(t, func() bool { return len(child.starts(t)) == 1 })
+	manager.mu.Lock()
+	cmd := manager.cmd
+	manager.mu.Unlock()
+	target, err := manager.PrepareStop()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := target.Terminate(t.Context())
+	if err != nil || got.State != StateExited || got.PID != 0 || got.WaitError != nil {
+		t.Fatalf("Terminate() = %+v, %v", got, err)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("Stop succeeded before Cmd.Wait reaped the exact child")
+	}
+
+	next := newHelper(t, &manager, 0)
+	startHelper(t, &manager, next)
+	next.release(t)
+	assertExit(t, waitForExit(t, &manager), 0)
+}
+
+func TestStopTargetPreventsABAKillOfReplacementChild(t *testing.T) {
+	t.Parallel()
+	var manager Manager
+	first := newHelper(t, &manager, 0)
+	startHelper(t, &manager, first)
+	waitFor(t, func() bool { return len(first.starts(t)) == 1 })
+	target, err := manager.PrepareStop()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The target exits naturally after it is reserved. Its Wait path may clear
+	// process ownership, but Start remains fenced until this exact target is
+	// resolved or released.
+	first.release(t)
+	assertExit(t, waitForExit(t, &manager), 0)
+	second := newHelper(t, &manager, 0)
+	if _, err := manager.Start(t.Context(), second.spec); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("replacement Start while old Stop target is reserved = %v", err)
+	}
+	if got, err := target.Terminate(t.Context()); err != nil || got.State != StateExited {
+		t.Fatalf("natural-exit Stop = %+v, %v", got, err)
+	}
+
+	secondStarted := startHelper(t, &manager, second)
+	waitFor(t, func() bool { return len(second.starts(t)) == 1 })
+	if _, err := target.Terminate(t.Context()); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("old target reuse = %v", err)
+	}
+	if got := manager.Observe(); got != secondStarted {
+		t.Fatalf("old Stop target changed replacement child: %+v, want %+v", got, secondStarted)
+	}
+	second.release(t)
+	assertExit(t, waitForExit(t, &manager), 0)
+}
+
+func TestPrepareStopFailsClosedWithoutConfirmedRunningOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state State
+		owned bool
+	}{
+		{name: "not started", state: StateNotStarted},
+		{name: "exited", state: StateExited},
+		{name: "unknown", state: StateUnknown, owned: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := Manager{observation: Observation{State: test.state}}
+			if test.owned {
+				manager.cmd = exec.Command("unused")
+				manager.waitDone = make(chan struct{})
+				manager.observation.PID = 123
+			}
+			if target, err := manager.PrepareStop(); target != nil || !errors.Is(err, ErrStateConflict) {
+				t.Fatalf("PrepareStop() = %#v, %v", target, err)
+			}
+		})
+	}
+}
+
+func TestOnlyOneStopTargetCanReserveOwnedChild(t *testing.T) {
+	t.Parallel()
+	var manager Manager
+	child := newHelper(t, &manager, 0)
+	startHelper(t, &manager, child)
+	waitFor(t, func() bool { return len(child.starts(t)) == 1 })
+	target, err := manager.PrepareStop()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, err := manager.PrepareStop(); duplicate != nil || !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("duplicate PrepareStop() = %#v, %v", duplicate, err)
+	}
+	target.Release()
+	retry, err := manager.PrepareStop()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := retry.Terminate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWaitFailureRetainsOwnership(t *testing.T) {
 	// Fault-inject a Wait error with no ProcessState using an unstarted Cmd.
 	// No real child is created or abandoned by this error-path test.
 	cmd := exec.Command("unused-test-command")
-	manager := Manager{cmd: cmd, observation: Observation{State: StateRunning, PID: 123}}
-	manager.wait(cmd)
+	done := make(chan struct{})
+	manager := Manager{cmd: cmd, waitDone: done, observation: Observation{State: StateRunning, PID: 123}}
+	manager.wait(cmd, done)
 	got := manager.Observe()
 	if got.State != StateUnknown || got.PID != 123 || got.WaitError == nil || got.ExitCodeKnown {
 		t.Fatalf("unconfirmed wait = %+v", got)

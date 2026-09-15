@@ -15,10 +15,10 @@ import (
 
 type runtimeHandler struct {
 	http.Handler
-	starter *lifecycle.Starter
+	executor *lifecycle.Executor
 }
 
-func validateStartConfig(journalPath, executable string) error {
+func validateLifecycleConfig(journalPath, executable string) error {
 	if (journalPath == "") != (executable == "") {
 		return errors.New("CPAMP_RUNTIME_JOURNAL_PATH and CPAMP_CPA_EXECUTABLE must be configured together")
 	}
@@ -31,7 +31,7 @@ func validateStartConfig(journalPath, executable string) error {
 // newRuntimeHandler opens the private journal once at Supervisor startup. HTTP
 // submissions share this resource and the same child ownership/serialization.
 func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error) {
-	if err := validateStartConfig(cfg.journalPath, cfg.cpaExecutable); err != nil {
+	if err := validateLifecycleConfig(cfg.journalPath, cfg.cpaExecutable); err != nil {
 		return nil, err
 	}
 	settings := protocol.Config{
@@ -45,14 +45,15 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		if err != nil {
 			return nil, fmt.Errorf("open operation journal: %w", err)
 		}
-		runtime.starter, err = lifecycle.NewStarter(journal.Authority{
+		runtime.executor, err = lifecycle.NewExecutor(journal.Authority{
 			RuntimeIdentity:   strings.TrimSpace(cfg.runtimeIdentity),
 			RuntimeGeneration: cfg.runtimeGeneration,
 		}, store, &cpaprocess.Manager{}, cfg.cpaExecutable)
 		if err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
-		settings.Start = runtime.starter
+		settings.Start = runtime.executor
+		settings.Stop = runtime.executor
 	}
 	handler, err := protocol.NewHandler(settings)
 	if err != nil {
@@ -63,8 +64,14 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 }
 
 func (r *runtimeHandler) Close() error {
-	if r.starter == nil {
+	if r.executor == nil {
 		return nil
 	}
-	return r.starter.Close()
+	return r.executor.Close()
+}
+
+func (r *runtimeHandler) CloseAdmission() {
+	if r.executor != nil {
+		r.executor.CloseAdmission()
+	}
 }

@@ -1,6 +1,7 @@
 // Package cpaprocess owns the Supervisor's in-memory CPA child process.
-// It exposes no product entry point. Future lifecycle callers must durably
-// record intent before calling Start; this primitive does not own that policy.
+// It exposes no product entry point. Lifecycle callers must durably record
+// intent before Start or prepared Stop termination; this primitive does not
+// own that policy.
 package cpaprocess
 
 import (
@@ -18,6 +19,7 @@ var (
 	ErrStateConflict = errors.New("CPA child is already owned")
 	ErrInvalidSpec   = errors.New("invalid CPA start spec")
 	ErrSpawnFailed   = errors.New("CPA child spawn failed")
+	ErrStopFailed    = errors.New("CPA child stop failed")
 )
 
 // StartSpec supplies an executable and literal arguments, never a shell command.
@@ -57,7 +59,22 @@ type Observation struct {
 type Manager struct {
 	mu          sync.Mutex
 	cmd         *exec.Cmd
+	waitDone    chan struct{}
+	stopTarget  *exec.Cmd
 	observation Observation
+}
+
+// StopTarget is an opaque reservation for the exact child owned when Stop was
+// prepared. It carries no PID or caller-selected termination policy.
+type StopTarget interface {
+	Terminate(context.Context) (Observation, error)
+	Release()
+}
+
+type ownedStopTarget struct {
+	manager *Manager
+	cmd     *exec.Cmd
+	done    <-chan struct{}
 }
 
 // Start serializes validation, spawn and ownership publication. Context is
@@ -73,7 +90,7 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	if err := ctx.Err(); err != nil {
 		return m.observeLocked(), err
 	}
-	if m.cmd != nil {
+	if m.cmd != nil || m.stopTarget != nil {
 		return m.observeLocked(), ErrStateConflict
 	}
 	if strings.TrimSpace(spec.Executable) == "" || strings.ContainsRune(spec.Executable, '\x00') {
@@ -94,9 +111,91 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 		return m.observeLocked(), fmt.Errorf("%w: %w", ErrSpawnFailed, err)
 	}
 	m.cmd = cmd
+	m.waitDone = make(chan struct{})
 	m.observation = Observation{State: StateRunning, PID: cmd.Process.Pid}
-	go m.wait(cmd)
+	go m.wait(cmd, m.waitDone)
 	return m.observation, nil
+}
+
+// PrepareStop reserves the exact currently owned running child before durable
+// Stop intent is recorded. Start remains fenced even if that child naturally
+// exits before termination begins, preventing a later child from being used as
+// the target of an older Stop operation. Release abandons the reservation
+// without sending a termination request.
+func (m *Manager) PrepareStop() (StopTarget, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cmd == nil || m.observation.State != StateRunning || m.stopTarget != nil || m.waitDone == nil {
+		return nil, ErrStateConflict
+	}
+	m.stopTarget = m.cmd
+	return &ownedStopTarget{manager: m, cmd: m.cmd, done: m.waitDone}, nil
+}
+
+// Terminate uses the reserved child handle only. Success requires the same
+// child's Wait path to publish a confirmed exit and release ownership.
+func (target *ownedStopTarget) Terminate(ctx context.Context) (Observation, error) {
+	if target == nil || target.manager == nil || target.cmd == nil || target.done == nil {
+		return Observation{}, ErrStateConflict
+	}
+	manager := target.manager
+	defer target.Release()
+
+	manager.mu.Lock()
+	if manager.stopTarget != target.cmd {
+		observation := manager.observeLocked()
+		manager.mu.Unlock()
+		return observation, ErrStateConflict
+	}
+	if err := ctx.Err(); err != nil {
+		observation := manager.observeLocked()
+		manager.mu.Unlock()
+		return observation, err
+	}
+	if manager.cmd == nil && manager.observation.State == StateExited {
+		observation := manager.observeLocked()
+		manager.mu.Unlock()
+		return observation, nil
+	}
+	if manager.cmd != target.cmd || manager.observation.State != StateRunning {
+		observation := manager.observeLocked()
+		manager.mu.Unlock()
+		return observation, ErrStopFailed
+	}
+	manager.mu.Unlock()
+
+	killErr := target.cmd.Process.Kill()
+	if killErr != nil {
+		select {
+		case <-target.done:
+			// A natural exit may race the hard termination request. Confirm the
+			// exact child's Wait/reap result below before declaring success.
+		default:
+			return manager.Observe(), fmt.Errorf("%w: %w", ErrStopFailed, killErr)
+		}
+	} else {
+		<-target.done
+	}
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	observation := manager.observeLocked()
+	if manager.cmd == nil && observation.State == StateExited {
+		return observation, nil
+	}
+	return observation, ErrStopFailed
+}
+
+// Release removes only this target's reservation. It never terminates a child.
+func (target *ownedStopTarget) Release() {
+	if target == nil || target.manager == nil || target.cmd == nil {
+		return
+	}
+	target.manager.mu.Lock()
+	defer target.manager.mu.Unlock()
+	if target.manager.stopTarget == target.cmd {
+		target.manager.stopTarget = nil
+	}
 }
 
 // childEnvironment strips the Supervisor-private namespace and executable
@@ -132,10 +231,15 @@ func (m *Manager) observeLocked() Observation {
 	return m.observation
 }
 
-func (m *Manager) wait(cmd *exec.Cmd) {
+func (m *Manager) wait(cmd *exec.Cmd, done chan struct{}) {
 	err := cmd.Wait()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer close(done)
+
+	if m.cmd != cmd || m.waitDone != done {
+		return
+	}
 
 	if cmd.ProcessState == nil {
 		// An OS wait failure is not proof the child exited. Retain the handle
@@ -145,6 +249,7 @@ func (m *Manager) wait(cmd *exec.Cmd) {
 		return
 	}
 	m.cmd = nil
+	m.waitDone = nil
 	m.observation = Observation{State: StateExited}
 	if code := cmd.ProcessState.ExitCode(); code >= 0 {
 		m.observation.ExitCode = code
