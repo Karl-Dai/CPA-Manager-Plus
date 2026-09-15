@@ -96,7 +96,7 @@ func TestStartReadOnlyModeIsUnsupported(t *testing.T) {
 	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != http.MethodPost {
 		t.Fatalf("Start method = %d, Allow %q", method.Code, method.Header().Get("Allow"))
 	}
-	for _, path := range []string{"/v1/runtime/operations/restart", "/v1/runtime/operations/op"} {
+	for _, path := range []string{"/v1/runtime/operations/op"} {
 		if w := request(t, h, http.MethodPost, path, testRuntimeToken); w.Code != http.StatusNotFound {
 			t.Fatalf("out-of-scope endpoint %s is exposed: %d", path, w.Code)
 		}

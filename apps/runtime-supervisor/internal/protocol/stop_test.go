@@ -109,8 +109,11 @@ func TestLifecycleCapabilitiesAreDeterministicAndDoNotClaimReadiness(t *testing.
 		stop: func(_ context.Context, request lifecycle.StopRequest) (journal.Operation, error) {
 			return journal.Operation{OperationID: request.OperationID, OperationType: "stop", RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, State: journal.StateSucceeded}, nil
 		},
+		restart: func(_ context.Context, request lifecycle.RestartRequest) (journal.Operation, error) {
+			return journal.Operation{OperationID: request.OperationID, OperationType: "restart", RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, State: journal.StateSucceeded}, nil
+		},
 	}
-	h, err := NewHandler(Config{RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, Token: testRuntimeToken, Start: executor, Stop: executor})
+	h, err := NewHandler(Config{RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, Token: testRuntimeToken, Start: executor, Stop: executor, Restart: executor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +121,7 @@ func TestLifecycleCapabilitiesAreDeterministicAndDoNotClaimReadiness(t *testing.
 		var status statusResponse
 		decodeResponse(t, request(t, h, http.MethodGet, path, testRuntimeToken), &status)
 		if status.RuntimeGeneration != 7 || status.CPAObservedVersion != "" ||
-			!reflect.DeepEqual(status.Capabilities, []string{"start", "stop"}) ||
+			!reflect.DeepEqual(status.Capabilities, []string{"start", "stop", "restart"}) ||
 			(path == statusPath && status.State != "unknown") {
 			t.Fatalf("%s invented observation or lost lifecycle capability: %+v", path, status)
 		}
@@ -193,8 +196,9 @@ func (f stopFunc) Stop(ctx context.Context, request lifecycle.StopRequest) (jour
 }
 
 type lifecycleFunc struct {
-	start startFunc
-	stop  stopFunc
+	start   startFunc
+	stop    stopFunc
+	restart restartFunc
 }
 
 func (f lifecycleFunc) Start(ctx context.Context, request lifecycle.StartRequest) (journal.Operation, error) {
@@ -203,6 +207,10 @@ func (f lifecycleFunc) Start(ctx context.Context, request lifecycle.StartRequest
 
 func (f lifecycleFunc) Stop(ctx context.Context, request lifecycle.StopRequest) (journal.Operation, error) {
 	return f.stop(ctx, request)
+}
+
+func (f lifecycleFunc) Restart(ctx context.Context, request lifecycle.RestartRequest) (journal.Operation, error) {
+	return f.restart(ctx, request)
 }
 
 func stopHandler(t *testing.T, executor StopExecutor) http.Handler {

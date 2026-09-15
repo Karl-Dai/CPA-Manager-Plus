@@ -23,6 +23,7 @@ type Config struct {
 	Token             string
 	Start             StartExecutor
 	Stop              StopExecutor
+	Restart           RestartExecutor
 }
 
 type handler struct {
@@ -31,6 +32,7 @@ type handler struct {
 	tokenDigest       [sha256.Size]byte
 	start             StartExecutor
 	stop              StopExecutor
+	restart           RestartExecutor
 }
 
 type handshakeResponse struct {
@@ -78,6 +80,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		tokenDigest:       sha256.Sum256([]byte(config.Token)),
 		start:             config.Start,
 		stop:              config.Stop,
+		restart:           config.Restart,
 	}, nil
 }
 
@@ -85,7 +88,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	method := http.MethodGet
 	switch r.URL.Path {
 	case handshakePath, statusPath:
-	case startPath, stopPath:
+	case startPath, stopPath, restartPath:
 		method = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "runtime endpoint not found")
@@ -123,16 +126,21 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.submitStart(w, r)
 	case stopPath:
 		h.submitStop(w, r)
+	case restartPath:
+		h.submitRestart(w, r)
 	}
 }
 
 func (h *handler) capabilities() []string {
-	capabilities := make([]string, 0, 2)
+	capabilities := make([]string, 0, 3)
 	if h.start != nil {
 		capabilities = append(capabilities, CapabilityStart)
 	}
 	if h.stop != nil {
 		capabilities = append(capabilities, CapabilityStop)
+	}
+	if h.restart != nil {
+		capabilities = append(capabilities, CapabilityRestart)
 	}
 	return capabilities
 }
