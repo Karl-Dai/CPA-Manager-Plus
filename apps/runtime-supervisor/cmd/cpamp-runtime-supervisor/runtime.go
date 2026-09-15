@@ -11,6 +11,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 )
 
 type runtimeHandler struct {
@@ -34,6 +35,9 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 	if err := validateLifecycleConfig(cfg.journalPath, cfg.cpaExecutable); err != nil {
 		return nil, err
 	}
+	if err := readiness.ValidateAddress(cfg.cpaAddr); err != nil {
+		return nil, fmt.Errorf("CPAMP_RUNTIME_CPA_ADDR: %w", err)
+	}
 	settings := protocol.Config{
 		RuntimeIdentity:   cfg.runtimeIdentity,
 		RuntimeGeneration: cfg.runtimeGeneration,
@@ -41,6 +45,11 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 	}
 	runtime := &runtimeHandler{}
 	if cfg.journalPath != "" {
+		child := &cpaprocess.Manager{}
+		observer, err := readiness.New(child, cfg.cpaAddr)
+		if err != nil {
+			return nil, err
+		}
 		store, err := journal.Open(ctx, cfg.journalPath, journal.Options{})
 		if err != nil {
 			return nil, fmt.Errorf("open operation journal: %w", err)
@@ -48,13 +57,14 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		runtime.executor, err = lifecycle.NewExecutor(journal.Authority{
 			RuntimeIdentity:   strings.TrimSpace(cfg.runtimeIdentity),
 			RuntimeGeneration: cfg.runtimeGeneration,
-		}, store, &cpaprocess.Manager{}, cfg.cpaExecutable)
+		}, store, child, cfg.cpaExecutable)
 		if err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
 		settings.Start = runtime.executor
 		settings.Stop = runtime.executor
 		settings.Restart = runtime.executor
+		settings.Status = observer
 	}
 	handler, err := protocol.NewHandler(settings)
 	if err != nil {

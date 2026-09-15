@@ -2,6 +2,7 @@
 package protocol
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -9,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"unicode"
+
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 )
 
 const (
@@ -24,6 +27,13 @@ type Config struct {
 	Start             StartExecutor
 	Stop              StopExecutor
 	Restart           RestartExecutor
+	Status            StatusObserver
+}
+
+// StatusObserver supplies read-only availability facts after authentication.
+// Handshake and mutation submission never call it.
+type StatusObserver interface {
+	Observe(context.Context) readiness.State
 }
 
 type handler struct {
@@ -33,6 +43,7 @@ type handler struct {
 	start             StartExecutor
 	stop              StopExecutor
 	restart           RestartExecutor
+	status            StatusObserver
 }
 
 type handshakeResponse struct {
@@ -81,6 +92,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		start:             config.Start,
 		stop:              config.Stop,
 		restart:           config.Restart,
+		status:            config.Status,
 	}, nil
 }
 
@@ -114,11 +126,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Capabilities:      h.capabilities(),
 		})
 	case statusPath:
+		state := readiness.Unknown
+		if h.status != nil {
+			state = h.status.Observe(r.Context())
+		}
 		writeJSON(w, http.StatusOK, statusResponse{
 			ProtocolVersion:    Version,
 			RuntimeIdentity:    h.runtimeIdentity,
 			RuntimeGeneration:  h.runtimeGeneration,
-			State:              "unknown",
+			State:              string(state),
 			CPAObservedVersion: "",
 			Capabilities:       h.capabilities(),
 		})

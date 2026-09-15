@@ -210,14 +210,22 @@ Secrets MUST NOT be written to the Supervisor operation journal, progress events
 
 ### 7. Readiness and crash-loop fencing
 
-Runtime readiness is based on deterministic runtime conditions, not a real provider/model request.
+Lifecycle mutation success is separate from readiness: Start succeeds at spawn and ownership publication, Stop at confirmed exact-child reap, and Restart at old-child reap plus replacement spawn and ownership publication. These operations do not wait for readiness or write readiness into their journal evidence.
 
-A CPA runtime becomes ready only after the required local checks succeed, including:
+Authenticated `GET /v1/runtime/status` computes Embedded readiness on demand from the same Supervisor-owned process manager. A child is ready only when it is observed running both before and after a successful probe of its expected local listener/status route, with both observations referring to the same child instance. Supervisor-local, non-reusable in-memory child instance identity fences stale probe results across exit and replacement, including PID reuse. It is not persisted, exposed as protocol authority, substituted for an exact Stop target, or used as RuntimeGeneration.
 
-1. CPA process is alive.
-2. Expected listener is ready.
-3. CPA management/status probe succeeds.
-4. Running version matches the expected operation state when version is part of the operation precondition.
+The current safe probe is one bounded `HEAD http://<CPAMP_RUNTIME_CPA_ADDR>/healthz` request, accepting only HTTP 200. The Supervisor-private address defaults to `127.0.0.1:8317` and must be a loopback literal or `localhost` with a valid port. The path is fixed, environment HTTP proxies are disabled, and redirects are not followed. Handshake and unauthorized status requests do not probe. Probe failures are observed unready conditions, not Runtime Protocol server errors; observation does not write the journal or change lifecycle state, Runtime identity/generation, or capabilities.
+
+| Observation | Runtime state |
+|---|---|
+| Read-only Supervisor, or unconfirmed child ownership | `unknown` |
+| Not started, or confirmed exited/reaped | `offline` |
+| Owned child running, but local probe has not succeeded for that same instance | `starting` |
+| Same owned child running before/after a local `/healthz` HTTP 200 | `ready` |
+
+Readiness MUST NOT use provider/model requests, acquire or retain the Manager-owned CPA Management Key, or intentionally make failed Management API authentication attempts. Missing or incorrect Management keys can trigger CPA IP bans; those failures and Management response version headers are not readiness evidence.
+
+`CPAObservedVersion` is an optional observed fact, including for a ready Embedded runtime. The current safe `/healthz` route provides no running version, so Supervisor leaves it empty rather than substituting configured or expected values. Version matching becomes a readiness gate only when a future operation/configuration contract supplies both a trusted expected version and a safe observed-version source. External may retain its adapter-specific authenticated Management API version requirement.
 
 Provider availability, quota state, credential cooling, or upstream network failure MUST NOT make the CPA process itself "not ready". These belong to gateway/provider health.
 

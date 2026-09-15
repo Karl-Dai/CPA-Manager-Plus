@@ -15,10 +15,13 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 )
 
 const (
 	defaultRuntimeAddr = "127.0.0.1:18318"
+	defaultCPAAddr     = "127.0.0.1:8317"
 	shutdownTimeout    = 10 * time.Second
 )
 
@@ -29,6 +32,7 @@ type config struct {
 	token             string
 	journalPath       string
 	cpaExecutable     string
+	cpaAddr           string
 }
 
 type generationSource func() (uint64, error)
@@ -66,6 +70,13 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 	if err := validateLifecycleConfig(journalPath, executable); err != nil {
 		return config{}, err
 	}
+	cpaAddr := strings.TrimSpace(getenv("CPAMP_RUNTIME_CPA_ADDR"))
+	if cpaAddr == "" {
+		cpaAddr = defaultCPAAddr
+	}
+	if err := readiness.ValidateAddress(cpaAddr); err != nil {
+		return config{}, fmt.Errorf("CPAMP_RUNTIME_CPA_ADDR: %w", err)
+	}
 	var generation uint64
 	for generation == 0 {
 		var err error
@@ -81,6 +92,7 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 		token:             token,
 		journalPath:       journalPath,
 		cpaExecutable:     executable,
+		cpaAddr:           cpaAddr,
 	}, nil
 }
 

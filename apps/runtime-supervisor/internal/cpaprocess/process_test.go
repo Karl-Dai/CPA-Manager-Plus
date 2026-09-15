@@ -208,7 +208,7 @@ func TestStartFiltersOnlySupervisorPrivateEnvironment(t *testing.T) {
 	private := []string{
 		"CPAMP_RUNTIME_TOKEN", "CPAMP_RUNTIME_JOURNAL_PATH", "CPAMP_RUNTIME_IDENTITY",
 		"CPAMP_RUNTIME_ADDR", "CPAMP_RUNTIME_GENERATION", "CPAMP_CPA_EXECUTABLE",
-		"CPAMP_RUNTIME_FUTURE_SECRET",
+		"CPAMP_RUNTIME_FUTURE_SECRET", "CPAMP_RUNTIME_CPA_ADDR",
 	}
 	for _, key := range private {
 		t.Setenv(key, "test-only-private-value")
@@ -287,6 +287,7 @@ func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
 			name: "Unix names are case sensitive",
 			parent: []string{
 				"CPAMP_RUNTIME_TOKEN=secret", "CPAMP_RUNTIME_FUTURE_SECRET=secret", "CPAMP_CPA_EXECUTABLE=/cpa",
+				"CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317",
 				"cpamp_runtime_token=ordinary", "cpamp_cpa_executable=ordinary", "CPAMP_RUNTIME=ordinary",
 				"CPAMP_DEPLOYMENT_SENTINEL=ordinary", "CPAMP_CPA_EXECUTABLE_SUFFIX=ordinary",
 				"NORMAL_SENTINEL=first", "CPAMP_RUNTIME_TOKEN=duplicate-secret", "NORMAL_SENTINEL=",
@@ -306,6 +307,7 @@ func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
 				`Path=C:\bin`, `SystemRoot=C:\Windows`, `wInDiR=C:\Windows`, `UserProfile=C:\Users\cpa`,
 				`HomeDrive=C:`, `HomePath=\Users\cpa`, `tMp=C:\tmp`, `TeMp=C:\temp`,
 				"CpAmP_RuNtImE_ToKeN=secret", "cpamp_runtime_future_secret=secret", "cpamp_cpa_executable=cpa.exe",
+				"CpAmP_RuNtImE_CpA_AdDr=127.0.0.1:8317",
 				"Cpamp_Deployment_Sentinel=ordinary", "Cpamp_Cpa_Executable_Suffix=ordinary", "CPAMP_RUNTIME=ordinary",
 				"Http_Proxy=http://proxy.invalid:3128", `=C:=C:\work`,
 			},
@@ -345,7 +347,7 @@ func TestSignalExitHasNoInventedExitCode(t *testing.T) {
 	t.Parallel()
 	var manager Manager
 	child := newHelper(t, &manager, 0)
-	startHelper(t, &manager, child)
+	started := startHelper(t, &manager, child)
 	waitFor(t, func() bool { return len(child.starts(t)) == 1 })
 	manager.mu.Lock()
 	process := manager.cmd.Process
@@ -354,7 +356,7 @@ func TestSignalExitHasNoInventedExitCode(t *testing.T) {
 	if err := process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	if got := waitForExit(t, &manager); got != (Observation{State: StateExited}) {
+	if got := waitForExit(t, &manager); got != (Observation{State: StateExited, InstanceID: started.InstanceID}) {
 		t.Fatalf("signal exit = %+v, want unknown exit code", got)
 	}
 }
@@ -581,7 +583,7 @@ func waitForExit(t *testing.T, manager *Manager) Observation {
 
 func assertExit(t *testing.T, got Observation, code int) {
 	t.Helper()
-	if got != (Observation{State: StateExited, ExitCode: code, ExitCodeKnown: true}) {
+	if got.InstanceID == 0 || got != (Observation{State: StateExited, InstanceID: got.InstanceID, ExitCode: code, ExitCodeKnown: true}) {
 		t.Fatalf("exit = %+v, want reaped child with code %d", got, code)
 	}
 }
