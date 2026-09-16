@@ -390,8 +390,17 @@ baseline_status="$(wait_runtime_observation ready armed manager 120)"
 baseline_identity="$(printf '%s' "${baseline_status}" | json_field runtimeIdentity)"
 baseline_generation="$(printf '%s' "${baseline_status}" | json_uint_field runtimeGeneration)"
 baseline_attempts="$(printf '%s' "${baseline_status}" | json_field recovery.attemptsRemaining)"
+baseline_artifact_id="$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.artifactId)"
 assert_not_equal "${baseline_generation}" '0' 'baseline RuntimeGeneration must be non-zero'
 assert_equal "${baseline_attempts}" '3' 'baseline automatic recovery budget'
+if [[ ! "$baseline_artifact_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  fail "baseline active artifact ID is noncanonical: $baseline_artifact_id"
+fi
+assert_equal "$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.engine)" 'cpa' 'baseline artifact engine'
+assert_equal "$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.version)" '7.3.3' 'baseline trusted artifact version'
+assert_equal "$(printf '%s' "$baseline_status" | json_field cpaObservedVersion)" '7.3.3' 'baseline legacy version projection'
+runtime_binary_artifact_id="sha256:$("${compose[@]}" exec -T cpamp-runtime sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
+assert_equal "$baseline_artifact_id" "$runtime_binary_artifact_id" 'baseline exact executable artifact ID'
 baseline_cpa_pid="$(runtime_cpa_pid)"
 assert_cpa_pid_alive "${baseline_cpa_pid}"
 
@@ -460,6 +469,7 @@ scenario_d_inactive="$(wait_runtime_observation offline inactive local 60)"
 scenario_d_generation="$(printf '%s' "${scenario_d_inactive}" | json_uint_field runtimeGeneration)"
 assert_not_equal "${scenario_d_generation}" '0' 'scenario D RuntimeGeneration must be non-zero'
 assert_not_equal "${scenario_d_generation}" "${baseline_generation}" 'Runtime restart must create a new generation'
+assert_equal "$(printf '%s' "$scenario_d_inactive" | json_field activeGatewayArtifact.artifactId)" "$baseline_artifact_id" 'Runtime restart artifact identity'
 scenario_d_pre_journal="$(snapshot_runtime_journal scenario-d-before-reconcile)"
 assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${baseline_generation}" 'runtime-reconcile/v1:' succeeded -)" '1' 'old-generation Start evidence after Runtime restart'
 assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${scenario_d_generation}" 'runtime-reconcile/v1:' - -)" '0' 'new generation before Manager reconcile'
@@ -549,6 +559,7 @@ scenario_g_old_pid="$(runtime_cpa_pid)"
 "${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -KILL "$1"' sh "${scenario_g_old_pid}"
 scenario_g_ready="$(wait_runtime_observation ready armed local 120)"
 assert_equal "$(printf '%s' "${scenario_g_ready}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'automatic recovery RuntimeGeneration'
+assert_equal "$(printf '%s' "$scenario_g_ready" | json_field activeGatewayArtifact.artifactId)" "$baseline_artifact_id" 'same-binary automatic recovery artifact identity'
 assert_equal "$(printf '%s' "${scenario_g_ready}" | json_field recovery.attemptsRemaining)" '2' 'automatic recovery remaining budget'
 scenario_g_new_pid="$(runtime_cpa_pid)"
 assert_not_equal "${scenario_g_new_pid}" "${scenario_g_old_pid}" 'automatic recovery must replace the CPA child'
@@ -625,6 +636,7 @@ docker unpause "${manager_container}" >/dev/null
 paused_manager=""
 scenario_h_final_ready="$(wait_runtime_observation ready armed local 120)"
 assert_equal "$(printf '%s' "${scenario_h_final_ready}" | json_uint_field runtimeGeneration)" "${scenario_h_final_generation}" 'final ready generation'
+assert_equal "$(printf '%s' "$scenario_h_final_ready" | json_field activeGatewayArtifact.artifactId)" "$baseline_artifact_id" 'restored same-binary artifact identity'
 wait_public_success /health 60
 wait_public_success /v1/models 60
 sleep 7

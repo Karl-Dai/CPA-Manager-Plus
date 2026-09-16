@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
@@ -81,6 +82,11 @@ func TestStatusReportsRecoveryWithoutChangingAvailabilityOrCapabilities(t *testi
 }
 
 func TestStatusStatesPreserveRuntimeMetadataAndOptionalVersion(t *testing.T) {
+	activeArtifact := artifact.Observation{
+		Engine:     artifact.EngineCPA,
+		ArtifactID: artifact.ID("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Version:    "7.3.3",
+	}
 	for _, state := range []readiness.State{readiness.Unknown, readiness.Offline, readiness.Starting, readiness.Ready} {
 		t.Run(string(state), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -92,6 +98,10 @@ func TestStatusStatesPreserveRuntimeMetadataAndOptionalVersion(t *testing.T) {
 						t.Error("status lost caller context")
 					}
 					return state
+				}),
+				Artifact: artifactStatusObserverFunc(func() *artifact.Observation {
+					observed := activeArtifact
+					return &observed
 				}),
 			})
 			if err != nil {
@@ -107,7 +117,8 @@ func TestStatusStatesPreserveRuntimeMetadataAndOptionalVersion(t *testing.T) {
 			var got statusResponse
 			decodeResponse(t, response, &got)
 			if got.ProtocolVersion != "v1" || got.RuntimeIdentity != "runtime-01" || got.RuntimeGeneration != 7 ||
-				got.State != string(state) || got.CPAObservedVersion != "" || len(got.Capabilities) != 0 {
+				got.State != string(state) || got.CPAObservedVersion != "7.3.3" ||
+				got.ActiveGatewayArtifact == nil || *got.ActiveGatewayArtifact != activeArtifact || len(got.Capabilities) != 0 {
 				t.Fatalf("status changed authority or invented facts: %+v", got)
 			}
 		})
@@ -162,6 +173,24 @@ func TestStatusCallerCannotOverrideProbeOrForwardCredentials(t *testing.T) {
 	}
 }
 
+func TestStatusFailsClosedForInvalidArtifactObservation(t *testing.T) {
+	h, err := NewHandler(Config{
+		RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, Token: testRuntimeToken,
+		Artifact: artifactStatusObserverFunc(func() *artifact.Observation {
+			return &artifact.Observation{Engine: artifact.EngineCPA, ArtifactID: "sha256:UPPERCASE", Version: "7.3.3"}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, h, http.MethodGet, statusPath, testRuntimeToken)
+	var got statusResponse
+	decodeResponse(t, response, &got)
+	if got.ActiveGatewayArtifact != nil || got.CPAObservedVersion != "" {
+		t.Fatalf("status exposed invalid artifact observation: %+v", got)
+	}
+}
+
 type statusObserverFunc func(context.Context) readiness.State
 
 func (f statusObserverFunc) Observe(ctx context.Context) readiness.State { return f(ctx) }
@@ -169,6 +198,10 @@ func (f statusObserverFunc) Observe(ctx context.Context) readiness.State { retur
 type recoveryStatusObserverFunc func() lifecycle.RecoveryStatus
 
 func (f recoveryStatusObserverFunc) RecoveryStatus() lifecycle.RecoveryStatus { return f() }
+
+type artifactStatusObserverFunc func() *artifact.Observation
+
+func (f artifactStatusObserverFunc) Observation() *artifact.Observation { return f() }
 
 type statusProcess struct{}
 

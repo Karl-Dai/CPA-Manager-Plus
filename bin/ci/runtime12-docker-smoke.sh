@@ -182,6 +182,22 @@ if [ "$(printf '%s' "$ready_status" | json_field recovery.state)" != "armed" ]; 
   exit 1
 fi
 generation_before_runtime_recreate="$(printf '%s' "$ready_status" | json_uint_field runtimeGeneration)"
+active_artifact_id="$(printf '%s' "$ready_status" | json_field activeGatewayArtifact.artifactId)"
+if [[ ! "$active_artifact_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Runtime status returned a noncanonical active artifact ID: $active_artifact_id" >&2
+  exit 1
+fi
+if [ "$(printf '%s' "$ready_status" | json_field activeGatewayArtifact.engine)" != "cpa" ] ||
+  [ "$(printf '%s' "$ready_status" | json_field activeGatewayArtifact.version)" != "7.3.3" ] ||
+  [ "$(printf '%s' "$ready_status" | json_field cpaObservedVersion)" != "7.3.3" ]; then
+  echo "Runtime status did not expose the trusted bundled CPA v7.3.3 artifact" >&2
+  exit 1
+fi
+executable_artifact_id="sha256:$("${compose[@]}" exec -T cpamp-runtime sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
+if [ "$active_artifact_id" != "$executable_artifact_id" ]; then
+  echo "Runtime active artifact ID does not match exact CPA executable bytes" >&2
+  exit 1
+fi
 
 "${compose[@]}" exec -T cpamp-runtime sh -ec '
   test "$(tr "\000" "\n" </proc/1/cmdline | head -n1)" = "/usr/local/bin/cpamp-runtime-supervisor"
@@ -202,12 +218,22 @@ if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
   echo "Manager restart replaced a healthy CPA child" >&2
   exit 1
 fi
+manager_restart_status="$(wait_runtime_state ready 30)"
+if [ "$(printf '%s' "$manager_restart_status" | json_field activeGatewayArtifact.artifactId)" != "$active_artifact_id" ]; then
+  echo "Manager restart changed the active Gateway artifact ID" >&2
+  exit 1
+fi
 
 "${compose[@]}" up -d --force-recreate cpamp-manager >/dev/null
 retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
 sleep 7
 if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
   echo "Manager recreate replaced a healthy CPA child" >&2
+  exit 1
+fi
+manager_recreate_status="$(wait_runtime_state ready 30)"
+if [ "$(printf '%s' "$manager_recreate_status" | json_field activeGatewayArtifact.artifactId)" != "$active_artifact_id" ]; then
+  echo "Manager recreate changed the active Gateway artifact ID" >&2
   exit 1
 fi
 
@@ -220,6 +246,11 @@ retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
   echo "Manager stop/start replaced a healthy CPA child" >&2
+  exit 1
+fi
+manager_start_status="$(wait_runtime_state ready 30)"
+if [ "$(printf '%s' "$manager_start_status" | json_field activeGatewayArtifact.artifactId)" != "$active_artifact_id" ]; then
+  echo "Manager stop/start changed the active Gateway artifact ID" >&2
   exit 1
 fi
 
@@ -239,6 +270,10 @@ ready_after_recreate="$(wait_runtime_state ready 120)"
 generation_after_runtime_recreate="$(printf '%s' "$ready_after_recreate" | json_uint_field runtimeGeneration)"
 if [ "$generation_after_runtime_recreate" = "$generation_before_runtime_recreate" ]; then
   echo "Runtime recreate reused the Supervisor generation" >&2
+  exit 1
+fi
+if [ "$(printf '%s' "$ready_after_recreate" | json_field activeGatewayArtifact.artifactId)" != "$active_artifact_id" ]; then
+  echo "Supervisor recreation changed the unchanged active Gateway artifact ID" >&2
   exit 1
 fi
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null

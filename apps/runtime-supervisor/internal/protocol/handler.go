@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 )
@@ -30,6 +31,7 @@ type Config struct {
 	Restart           RestartExecutor
 	Status            StatusObserver
 	Recovery          RecoveryStatusObserver
+	Artifact          ArtifactStatusObserver
 }
 
 // StatusObserver supplies read-only availability facts after authentication.
@@ -42,6 +44,12 @@ type RecoveryStatusObserver interface {
 	RecoveryStatus() lifecycle.RecoveryStatus
 }
 
+// ArtifactStatusObserver returns only a cached observation. The owning
+// Supervisor lifecycle refreshes it; normal status polling performs no hashing.
+type ArtifactStatusObserver interface {
+	Observation() *artifact.Observation
+}
+
 type handler struct {
 	runtimeIdentity   string
 	runtimeGeneration uint64
@@ -51,6 +59,7 @@ type handler struct {
 	restart           RestartExecutor
 	status            StatusObserver
 	recovery          RecoveryStatusObserver
+	artifact          ArtifactStatusObserver
 }
 
 type handshakeResponse struct {
@@ -61,13 +70,14 @@ type handshakeResponse struct {
 }
 
 type statusResponse struct {
-	ProtocolVersion    string            `json:"protocolVersion"`
-	RuntimeIdentity    string            `json:"runtimeIdentity"`
-	RuntimeGeneration  uint64            `json:"runtimeGeneration"`
-	State              string            `json:"state"`
-	CPAObservedVersion string            `json:"cpaObservedVersion"`
-	Capabilities       []string          `json:"capabilities"`
-	Recovery           *recoveryResponse `json:"recovery,omitempty"`
+	ProtocolVersion       string                `json:"protocolVersion"`
+	RuntimeIdentity       string                `json:"runtimeIdentity"`
+	RuntimeGeneration     uint64                `json:"runtimeGeneration"`
+	State                 string                `json:"state"`
+	CPAObservedVersion    string                `json:"cpaObservedVersion"`
+	ActiveGatewayArtifact *artifact.Observation `json:"activeGatewayArtifact,omitempty"`
+	Capabilities          []string              `json:"capabilities"`
+	Recovery              *recoveryResponse     `json:"recovery,omitempty"`
 }
 
 type recoveryResponse struct {
@@ -107,6 +117,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		restart:           config.Restart,
 		status:            config.Status,
 		recovery:          config.Recovery,
+		artifact:          config.Artifact,
 	}, nil
 }
 
@@ -152,14 +163,24 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				AttemptsRemaining: observed.AttemptsRemaining,
 			}
 		}
+		var activeArtifact *artifact.Observation
+		var observedVersion string
+		if h.artifact != nil {
+			observed := h.artifact.Observation()
+			if observed != nil && observed.Validate() == nil {
+				activeArtifact = observed
+				observedVersion = activeArtifact.Version
+			}
+		}
 		writeJSON(w, http.StatusOK, statusResponse{
-			ProtocolVersion:    Version,
-			RuntimeIdentity:    h.runtimeIdentity,
-			RuntimeGeneration:  h.runtimeGeneration,
-			State:              string(state),
-			CPAObservedVersion: "",
-			Capabilities:       h.capabilities(),
-			Recovery:           recovery,
+			ProtocolVersion:       Version,
+			RuntimeIdentity:       h.runtimeIdentity,
+			RuntimeGeneration:     h.runtimeGeneration,
+			State:                 string(state),
+			CPAObservedVersion:    observedVersion,
+			ActiveGatewayArtifact: activeArtifact,
+			Capabilities:          h.capabilities(),
+			Recovery:              recovery,
 		})
 	case startPath:
 		h.submitStart(w, r)

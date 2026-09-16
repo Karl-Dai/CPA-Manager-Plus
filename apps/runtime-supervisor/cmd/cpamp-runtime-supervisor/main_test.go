@@ -425,13 +425,20 @@ func TestServeForcesCloseAfterShutdownTimeout(t *testing.T) {
 }
 
 type runtimeResponse struct {
-	ProtocolVersion    string                   `json:"protocolVersion"`
-	RuntimeIdentity    string                   `json:"runtimeIdentity"`
-	RuntimeGeneration  uint64                   `json:"runtimeGeneration"`
-	State              string                   `json:"state"`
-	CPAObservedVersion string                   `json:"cpaObservedVersion"`
-	Capabilities       []string                 `json:"capabilities"`
-	Recovery           *runtimeRecoveryResponse `json:"recovery"`
+	ProtocolVersion       string                   `json:"protocolVersion"`
+	RuntimeIdentity       string                   `json:"runtimeIdentity"`
+	RuntimeGeneration     uint64                   `json:"runtimeGeneration"`
+	State                 string                   `json:"state"`
+	CPAObservedVersion    string                   `json:"cpaObservedVersion"`
+	ActiveGatewayArtifact *runtimeArtifactResponse `json:"activeGatewayArtifact"`
+	Capabilities          []string                 `json:"capabilities"`
+	Recovery              *runtimeRecoveryResponse `json:"recovery"`
+}
+
+type runtimeArtifactResponse struct {
+	Engine     string `json:"engine"`
+	ArtifactID string `json:"artifactId"`
+	Version    string `json:"version"`
 }
 
 type runtimeRecoveryResponse struct {

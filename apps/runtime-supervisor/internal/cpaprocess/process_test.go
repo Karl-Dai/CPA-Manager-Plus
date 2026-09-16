@@ -208,7 +208,7 @@ func TestStartFiltersOnlySupervisorPrivateEnvironment(t *testing.T) {
 	private := []string{
 		"CPAMP_RUNTIME_TOKEN", "CPAMP_RUNTIME_JOURNAL_PATH", "CPAMP_RUNTIME_IDENTITY",
 		"CPAMP_RUNTIME_ADDR", "CPAMP_RUNTIME_GENERATION", "CPAMP_CPA_EXECUTABLE",
-		"CPAMP_RUNTIME_FUTURE_SECRET", "CPAMP_RUNTIME_CPA_ADDR",
+		"CPAMP_CPA_ARTIFACT_MANIFEST", "CPAMP_RUNTIME_FUTURE_SECRET", "CPAMP_RUNTIME_CPA_ADDR",
 	}
 	for _, key := range private {
 		t.Setenv(key, "test-only-private-value")
@@ -287,6 +287,7 @@ func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
 			name: "Unix names are case sensitive",
 			parent: []string{
 				"CPAMP_RUNTIME_TOKEN=secret", "CPAMP_RUNTIME_FUTURE_SECRET=secret", "CPAMP_CPA_EXECUTABLE=/cpa",
+				"CPAMP_CPA_ARTIFACT_MANIFEST=/trusted/artifact.json",
 				"CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317",
 				"cpamp_runtime_token=ordinary", "cpamp_cpa_executable=ordinary", "CPAMP_RUNTIME=ordinary",
 				"CPAMP_DEPLOYMENT_SENTINEL=ordinary", "CPAMP_CPA_EXECUTABLE_SUFFIX=ordinary",

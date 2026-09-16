@@ -53,13 +53,19 @@ func TestRuntimeCapabilitiesSupportsExactCapability(t *testing.T) {
 }
 
 func TestRuntimeObservedStatusValidate(t *testing.T) {
+	activeArtifact := &ActiveGatewayArtifact{
+		Engine:     "cpa",
+		ArtifactID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Version:    "v7.1.18",
+	}
 	valid := RuntimeObservedStatus{
-		Identity:           "runtime-01",
-		Generation:         1,
-		ProtocolVersion:    "v1",
-		State:              RuntimeStateReady,
-		CPAObservedVersion: "v7.1.18",
-		Capabilities:       RuntimeCapabilities{"status"},
+		Identity:              "runtime-01",
+		Generation:            1,
+		ProtocolVersion:       "v1",
+		State:                 RuntimeStateReady,
+		CPAObservedVersion:    "v7.1.18",
+		ActiveGatewayArtifact: activeArtifact,
+		Capabilities:          RuntimeCapabilities{"status"},
 		Recovery: &RuntimeRecoveryObservation{
 			State:             RuntimeRecoveryStateArmed,
 			AttemptsRemaining: 3,
@@ -70,26 +76,26 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 	}
 	withoutVersion := valid
 	withoutVersion.CPAObservedVersion = ""
+	withoutVersion.ActiveGatewayArtifact = nil
 	if err := withoutVersion.Validate(); err != nil {
 		t.Fatalf("ready status without a safe observed version: %v", err)
 	}
 
-	offline := valid
+	offline := withoutVersion
 	offline.State = RuntimeStateOffline
-	offline.CPAObservedVersion = ""
 	if err := offline.Validate(); err != nil {
 		t.Fatalf("offline status without CPA version: %v", err)
 	}
-	starting := valid
+	starting := withoutVersion
 	starting.State = RuntimeStateStarting
-	starting.CPAObservedVersion = ""
 	if err := starting.Validate(); err != nil {
 		t.Fatalf("starting status without CPA version: %v", err)
 	}
-	external := valid
+	external := withoutVersion
 	external.ProtocolVersion = ""
 	external.Identity = ""
 	external.Generation = 0
+	external.CPAObservedVersion = "v7.1.18"
 	if err := external.Validate(); err != nil {
 		t.Fatalf("external status without Runtime Protocol metadata: %v", err)
 	}
@@ -123,6 +129,23 @@ func TestRuntimeObservedStatusValidate(t *testing.T) {
 		},
 		"excess recovery attempts": func(status *RuntimeObservedStatus) {
 			status.Recovery = &RuntimeRecoveryObservation{State: RuntimeRecoveryStateArmed, AttemptsRemaining: 4}
+		},
+		"noncanonical artifact ID": func(status *RuntimeObservedStatus) {
+			status.ActiveGatewayArtifact = &ActiveGatewayArtifact{Engine: "cpa", ArtifactID: "sha256:ABC", Version: "v7.1.18"}
+		},
+		"unsupported artifact engine": func(status *RuntimeObservedStatus) {
+			status.ActiveGatewayArtifact = &ActiveGatewayArtifact{Engine: "gateway", ArtifactID: activeArtifact.ArtifactID, Version: "v7.1.18"}
+		},
+		"version differs from trusted artifact": func(status *RuntimeObservedStatus) {
+			status.CPAObservedVersion = "v7.1.19"
+		},
+		"embedded version without artifact": func(status *RuntimeObservedStatus) {
+			status.ActiveGatewayArtifact = nil
+		},
+		"artifact without Runtime Protocol": func(status *RuntimeObservedStatus) {
+			status.ProtocolVersion = ""
+			status.Identity = ""
+			status.Generation = 0
 		},
 	}
 	for name, mutate := range tests {

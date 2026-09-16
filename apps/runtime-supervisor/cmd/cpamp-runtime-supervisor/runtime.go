@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
@@ -19,12 +21,18 @@ type runtimeHandler struct {
 	executor *lifecycle.Executor
 }
 
-func validateLifecycleConfig(journalPath, executable string) error {
+func validateLifecycleConfig(journalPath, executable, artifactManifest string) error {
 	if (journalPath == "") != (executable == "") {
 		return errors.New("CPAMP_RUNTIME_JOURNAL_PATH and CPAMP_CPA_EXECUTABLE must be configured together")
 	}
 	if strings.ContainsRune(executable, '\x00') {
 		return errors.New("CPAMP_CPA_EXECUTABLE must not contain NUL")
+	}
+	if artifactManifest != "" && executable == "" {
+		return errors.New("CPAMP_CPA_ARTIFACT_MANIFEST requires CPAMP_CPA_EXECUTABLE")
+	}
+	if strings.ContainsRune(artifactManifest, '\x00') {
+		return errors.New("CPAMP_CPA_ARTIFACT_MANIFEST must not contain NUL")
 	}
 	return nil
 }
@@ -32,7 +40,7 @@ func validateLifecycleConfig(journalPath, executable string) error {
 // newRuntimeHandler opens the private journal once at Supervisor startup. HTTP
 // submissions share this resource and the same child ownership/serialization.
 func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error) {
-	if err := validateLifecycleConfig(cfg.journalPath, cfg.cpaExecutable); err != nil {
+	if err := validateLifecycleConfig(cfg.journalPath, cfg.cpaExecutable, cfg.cpaArtifactManifest); err != nil {
 		return nil, err
 	}
 	if err := readiness.ValidateAddress(cfg.cpaAddr); err != nil {
@@ -45,6 +53,10 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 	}
 	runtime := &runtimeHandler{}
 	if cfg.journalPath != "" {
+		artifactObserver := artifact.NewObserver(cfg.cpaExecutable, cfg.cpaArtifactManifest)
+		if err := artifactObserver.Refresh(); err != nil {
+			log.Printf("active Gateway artifact metadata is incomplete: %v", err)
+		}
 		child := &cpaprocess.Manager{}
 		observer, err := readiness.New(child, cfg.cpaAddr)
 		if err != nil {
@@ -66,6 +78,7 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		settings.Restart = runtime.executor
 		settings.Status = observer
 		settings.Recovery = runtime.executor
+		settings.Artifact = artifactObserver
 	}
 	handler, err := protocol.NewHandler(settings)
 	if err != nil {

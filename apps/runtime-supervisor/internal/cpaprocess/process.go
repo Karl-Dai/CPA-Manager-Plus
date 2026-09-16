@@ -228,7 +228,9 @@ func childEnvironment(parent []string, windows bool) []string {
 		if windows {
 			key = strings.ToUpper(key)
 		}
-		if strings.HasPrefix(key, "CPAMP_RUNTIME_") || key == "CPAMP_CPA_EXECUTABLE" {
+		if strings.HasPrefix(key, "CPAMP_RUNTIME_") ||
+			key == "CPAMP_CPA_EXECUTABLE" ||
+			key == "CPAMP_CPA_ARTIFACT_MANIFEST" {
 			continue
 		}
 		env = append(env, entry)

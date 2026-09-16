@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,70 @@ import (
 )
 
 const startHelperName = "cpamp-start-test-child.exe"
+
+func TestActiveArtifactObservationIsCachedAndOrthogonalToRuntimeGeneration(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "gateway")
+	manifest := filepath.Join(directory, "artifact.json")
+	executableBytes := []byte("stable-executable-bytes")
+	if err := os.WriteFile(executable, executableBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(executableBytes)
+	artifactID := fmt.Sprintf("sha256:%x", digest)
+	manifestJSON := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":"7.3.3","artifactId":%q}`, artifactID)
+	if err := os.WriteFile(manifest, []byte(manifestJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadTestConfig(t, fixedGeneration(41))
+	cfg.journalPath = filepath.Join(directory, "operations.sqlite")
+	cfg.cpaExecutable = executable
+	cfg.cpaArtifactManifest = manifest
+	cfg.cpaAddr = unreadyCPAAddr(t)
+	first, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstStatus := requestRuntime(t, first, "/v1/runtime/status")
+	if firstStatus.RuntimeGeneration != 41 || firstStatus.CPAObservedVersion != "7.3.3" ||
+		firstStatus.ActiveGatewayArtifact == nil ||
+		firstStatus.ActiveGatewayArtifact.Engine != "cpa" ||
+		firstStatus.ActiveGatewayArtifact.ArtifactID != artifactID ||
+		firstStatus.ActiveGatewayArtifact.Version != "7.3.3" {
+		t.Fatalf("first artifact observation = %+v", firstStatus)
+	}
+
+	// Status is a cache read. Even external tampering after the owning startup
+	// observation cannot turn polling into repeated full-file hashing.
+	if err := os.WriteFile(executable, []byte("tampered-after-startup"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		status := requestRuntime(t, first, "/v1/runtime/status")
+		if status.ActiveGatewayArtifact == nil || status.ActiveGatewayArtifact.ArtifactID != artifactID {
+			t.Fatalf("status rehashed executable instead of reading cache: %+v", status)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(executable, executableBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.runtimeGeneration = 42
+	second, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	secondStatus := requestRuntime(t, second, "/v1/runtime/status")
+	if secondStatus.RuntimeGeneration != 42 || secondStatus.ActiveGatewayArtifact == nil ||
+		secondStatus.ActiveGatewayArtifact.ArtifactID != artifactID {
+		t.Fatalf("new generation changed stable artifact identity: %+v", secondStatus)
+	}
+}
 
 // A private copy of the test executable selects the helper by filename. The
 // configured executable needs neither arguments nor inherited environment.
@@ -54,25 +119,30 @@ func TestMain(m *testing.M) {
 
 func TestLifecycleConfigurationIsAllOrNothing(t *testing.T) {
 	tests := []struct {
-		name, journal, executable string
-		wantError                 bool
+		name, journal, executable, manifest string
+		wantError                           bool
 	}{
-		{"read-only", "", "", false},
-		{"journal only", "operations.sqlite", "", true},
-		{"executable only", "", "cpa", true},
-		{"enabled", " operations.sqlite ", " cpa ", false},
-		{"invalid executable", "operations.sqlite", "cpa\x00", true},
+		{"read-only", "", "", "", false},
+		{"journal only", "operations.sqlite", "", "", true},
+		{"executable only", "", "cpa", "", true},
+		{"manifest only", "", "", "artifact.json", true},
+		{"enabled", " operations.sqlite ", " cpa ", " artifact.json ", false},
+		{"invalid executable", "operations.sqlite", "cpa\x00", "", true},
+		{"invalid manifest", "operations.sqlite", "cpa", "artifact\x00", true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			values := validConfigValues()
 			values["CPAMP_RUNTIME_JOURNAL_PATH"] = test.journal
 			values["CPAMP_CPA_EXECUTABLE"] = test.executable
+			values["CPAMP_CPA_ARTIFACT_MANIFEST"] = test.manifest
 			cfg, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
 			if (err != nil) != test.wantError {
 				t.Fatalf("loadConfig = %+v, %v", cfg, err)
 			}
-			if err == nil && (cfg.journalPath != strings.TrimSpace(test.journal) || cfg.cpaExecutable != strings.TrimSpace(test.executable)) {
+			if err == nil && (cfg.journalPath != strings.TrimSpace(test.journal) ||
+				cfg.cpaExecutable != strings.TrimSpace(test.executable) ||
+				cfg.cpaArtifactManifest != strings.TrimSpace(test.manifest)) {
 				t.Fatalf("lifecycle configuration = %+v", cfg)
 			}
 		})
@@ -607,7 +677,9 @@ func awaitSpawnCount(t *testing.T, directory string, count int) {
 						name = strings.ToUpper(name)
 					}
 					inherited[name] = true
-					if strings.HasPrefix(name, "CPAMP_RUNTIME_") || name == "CPAMP_CPA_EXECUTABLE" {
+					if strings.HasPrefix(name, "CPAMP_RUNTIME_") ||
+						name == "CPAMP_CPA_EXECUTABLE" ||
+						name == "CPAMP_CPA_ARTIFACT_MANIFEST" {
 						t.Errorf("typed Start passed private environment variable %s to CPA", name)
 					}
 				}

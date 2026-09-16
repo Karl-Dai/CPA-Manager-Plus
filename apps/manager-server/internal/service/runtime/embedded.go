@@ -90,13 +90,20 @@ func NewEmbeddedClientWithTokenSource(baseURL string, tokenSource RuntimeTokenSo
 }
 
 type embeddedStatusResponse struct {
-	ProtocolVersion    string                    `json:"protocolVersion"`
-	RuntimeIdentity    string                    `json:"runtimeIdentity"`
-	RuntimeGeneration  uint64                    `json:"runtimeGeneration"`
-	State              string                    `json:"state"`
-	CPAObservedVersion string                    `json:"cpaObservedVersion"`
-	Capabilities       []string                  `json:"capabilities"`
-	Recovery           *embeddedRecoveryResponse `json:"recovery"`
+	ProtocolVersion       string                         `json:"protocolVersion"`
+	RuntimeIdentity       string                         `json:"runtimeIdentity"`
+	RuntimeGeneration     uint64                         `json:"runtimeGeneration"`
+	State                 string                         `json:"state"`
+	CPAObservedVersion    string                         `json:"cpaObservedVersion"`
+	ActiveGatewayArtifact *embeddedActiveGatewayArtifact `json:"activeGatewayArtifact"`
+	Capabilities          []string                       `json:"capabilities"`
+	Recovery              *embeddedRecoveryResponse      `json:"recovery"`
+}
+
+type embeddedActiveGatewayArtifact struct {
+	Engine     string `json:"engine"`
+	ArtifactID string `json:"artifactId"`
+	Version    string `json:"version"`
 }
 
 type embeddedRecoveryResponse struct {
@@ -147,6 +154,13 @@ func (c *EmbeddedClient) Status(ctx context.Context) (model.RuntimeObservedStatu
 		State:              model.RuntimeState(response.State),
 		CPAObservedVersion: model.CPAObservedVersion(response.CPAObservedVersion),
 		Capabilities:       capabilities,
+	}
+	if response.ActiveGatewayArtifact != nil {
+		status.ActiveGatewayArtifact = &model.ActiveGatewayArtifact{
+			Engine:     response.ActiveGatewayArtifact.Engine,
+			ArtifactID: model.RuntimeArtifactID(response.ActiveGatewayArtifact.ArtifactID),
+			Version:    response.ActiveGatewayArtifact.Version,
+		}
 	}
 	if response.Recovery != nil {
 		status.Recovery = &model.RuntimeRecoveryObservation{
