@@ -33,6 +33,7 @@ jobs:
       frontend: ${{ steps.classify.outputs.frontend }}
       manager_server: ${{ steps.classify.outputs.manager_server }}
       runtime_supervisor: ${{ steps.classify.outputs.runtime_supervisor }}
+      ingress: ${{ steps.classify.outputs.ingress }}
       windows_sqlite: ${{ steps.classify.outputs.windows_sqlite }}
       native_control: ${{ steps.classify.outputs.native_control }}
       docker: ${{ steps.classify.outputs.docker }}
@@ -153,6 +154,10 @@ jobs:
         working-directory: apps/runtime-supervisor
         run: go test ./...
 
+      - name: Race test
+        working-directory: apps/runtime-supervisor
+        run: go test -race ./...
+
       - name: Vet
         working-directory: apps/runtime-supervisor
         run: go vet ./...
@@ -175,6 +180,60 @@ jobs:
 
       - name: Validate architecture boundary
         run: go run ./bin/ci/runtime-boundary/main.go
+
+  ingress:
+    name: Ingress
+    needs: changes
+    if: needs.changes.outputs.ingress == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+      GOFLAGS: -mod=readonly
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: apps/ingress/go.mod
+
+      - name: Test
+        working-directory: apps/ingress
+        run: go test ./...
+
+      - name: Race test
+        working-directory: apps/ingress
+        run: go test -race ./...
+
+      - name: Vet
+        working-directory: apps/ingress
+        run: go vet ./...
+
+      - name: Verify stdlib-only architecture boundary
+        working-directory: apps/ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+          modules="$(go list -mod=readonly -m all)"
+          if [ "$(printf '%s\n' "${modules}" | wc -l)" -ne 1 ]; then
+            printf 'Ingress must remain stdlib-only; module graph:\n%s\n' "${modules}" >&2
+            exit 1
+          fi
+
+      - name: Portability build
+        working-directory: apps/ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64; do
+            echo "Building ${target}"
+            output="${RUNNER_TEMP}/cpamp-ingress-${target%/*}-${target#*/}"
+            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              go build -trimpath -o "${output}" ./cmd/cpamp-ingress
+          done
 
   manager-server-windows-sqlite:
     name: Manager Server SQLite (Windows)
@@ -237,21 +296,32 @@ jobs:
       - changes
       - frontend
       - manager-server
+      - runtime-supervisor
+      - ingress
     if: >-
       always() &&
       needs.changes.outputs.docker == 'true' &&
       (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
-      (needs['manager-server'].result == 'success' || needs['manager-server'].result == 'skipped')
+      (needs['manager-server'].result == 'success' || needs['manager-server'].result == 'skipped') &&
+      (needs['runtime-supervisor'].result == 'success' || needs['runtime-supervisor'].result == 'skipped') &&
+      (needs.ingress.result == 'success' || needs.ingress.result == 'skipped')
 
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Validate Docker Compose configuration
-        run: docker compose -f docker-compose.manager.yml config
+      - name: Validate Docker Compose configurations
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose config --format json | node bin/ci/validate-runtime12-compose.mjs
+          docker compose -f docker-compose.manager.yml config >/dev/null
 
       - name: Build Manager Server image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -259,8 +329,34 @@ jobs:
           context: .
           file: Dockerfile.manager-server
           push: false
+          load: true
           build-args: |
             VERSION=ci
+
+      - name: Build Ingress images
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile.ingress
+          platforms: linux/amd64,linux/arm64
+          push: false
+
+      - name: Build Runtime images with pinned CPA
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile.runtime
+          platforms: linux/amd64,linux/arm64
+          push: false
+
+      - name: Build native smoke images
+        run: docker compose build
+
+      - name: Run single-public-port Runtime smoke
+        env:
+          CPAMP_SMOKE_PORT: '18317'
+          CPAMP_SMOKE_SKIP_BUILD: 'true'
+        run: bin/ci/runtime12-docker-smoke.sh
 
   demo-docs:
     name: Demo and Docs
@@ -336,6 +432,7 @@ jobs:
       - frontend
       - manager-server
       - runtime-supervisor
+      - ingress
       - manager-server-windows-sqlite
       - native-control
       - docker-build
@@ -351,6 +448,7 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           MANAGER_SERVER_RESULT: ${{ needs['manager-server'].result }}
           RUNTIME_SUPERVISOR_RESULT: ${{ needs['runtime-supervisor'].result }}
+          INGRESS_RESULT: ${{ needs.ingress.result }}
           WINDOWS_SQLITE_RESULT: ${{ needs['manager-server-windows-sqlite'].result }}
           NATIVE_CONTROL_RESULT: ${{ needs['native-control'].result }}
           DOCKER_BUILD_RESULT: ${{ needs['docker-build'].result }}
@@ -365,6 +463,7 @@ jobs:
             "Frontend:${FRONTEND_RESULT}"
             "Manager Server:${MANAGER_SERVER_RESULT}"
             "Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"
+            "Ingress:${INGRESS_RESULT}"
             "Manager Server SQLite (Windows):${WINDOWS_SQLITE_RESULT}"
             "Native Control:${NATIVE_CONTROL_RESULT}"
             "Docker Build:${DOCKER_BUILD_RESULT}"

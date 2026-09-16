@@ -1,0 +1,72 @@
+services:
+  cpamp-ingress:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingress
+    image: seakee/cpamp-ingress:latest
+    restart: unless-stopped
+    ports:
+      - '${CPAMP_PUBLIC_PORT:-18317}:18317'
+    environment:
+      CPAMP_INGRESS_ADDR: '0.0.0.0:18317'
+      CPAMP_MANAGER_URL: 'http://cpamp-manager:18317'
+      CPAMP_GATEWAY_URL: 'http://cpamp-runtime:8317'
+    depends_on:
+      - cpamp-manager
+      - cpamp-runtime
+
+  cpamp-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.manager-server
+      args:
+        VERSION: '${VERSION:-dev}'
+    image: seakee/cpa-manager-plus:latest
+    restart: unless-stopped
+    expose:
+      - '18317'
+    environment:
+      HTTP_ADDR: '0.0.0.0:18317'
+      USAGE_DB_PATH: '/data/usage.sqlite'
+      CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
+      CPA_UPSTREAM_URL: 'http://cpamp-runtime:8317'
+      USAGE_COLLECTOR_MODE: 'auto'
+      USAGE_RESP_QUEUE: 'usage'
+      USAGE_RESP_POP_SIDE: 'right'
+      USAGE_BATCH_SIZE: '100'
+      USAGE_POLL_INTERVAL_MS: '500'
+      USAGE_QUERY_LIMIT: '50000'
+      USAGE_CORS_ORIGINS: '*'
+    volumes:
+      - cpamp-manager-data:/data
+      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:18317/health']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  cpamp-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    image: seakee/cpamp-runtime:latest
+    restart: unless-stopped
+    expose:
+      - '8317'
+      - '9081'
+    environment:
+      CPAMP_RUNTIME_ADDR: '0.0.0.0:9081'
+      CPAMP_RUNTIME_IDENTITY: 'embedded-default'
+      CPAMP_RUNTIME_JOURNAL_PATH: '/runtime/supervisor/operations.sqlite'
+      CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:8317'
+      CPAMP_CPA_EXECUTABLE: '/usr/local/bin/cli-proxy-api'
+      CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'
+    volumes:
+      - cpamp-runtime-data:/runtime
+      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret
+
+volumes:
+  cpamp-manager-data:
+  cpamp-runtime-data:
+  cpamp-runtime-transport-secret:

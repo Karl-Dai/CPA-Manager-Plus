@@ -14,6 +14,7 @@ const noChecks = {
   frontend: false,
   manager_server: false,
   runtime_supervisor: false,
+  ingress: false,
   windows_sqlite: false,
   native_control: false,
   docker: false,
@@ -27,6 +28,7 @@ describe('PR check classifier', () => {
       frontend: true,
       manager_server: true,
       runtime_supervisor: true,
+      ingress: true,
       windows_sqlite: true,
       native_control: true,
       docker: true,
@@ -118,7 +120,7 @@ describe('PR check classifier', () => {
     });
   });
 
-  it('runs only Supervisor checks for Supervisor module changes', () => {
+  it('runs Supervisor and Docker checks for Supervisor module changes', () => {
     for (const filePath of [
       'apps/runtime-supervisor/go.mod',
       'apps/runtime-supervisor/internal/protocol/handler.go',
@@ -127,6 +129,7 @@ describe('PR check classifier', () => {
       expect(classifyChangedFiles([filePath])).toEqual({
         ...noChecks,
         runtime_supervisor: true,
+        docker: true,
       });
     }
   });
@@ -141,9 +144,33 @@ describe('PR check classifier', () => {
       ...noChecks,
       manager_server: true,
       runtime_supervisor: true,
-      windows_sqlite: true,
       docker: true,
+      windows_sqlite: true,
     });
+  });
+
+  it('runs Ingress and Docker checks for Ingress changes', () => {
+    for (const filePath of ['apps/ingress/internal/ingress/proxy.go', 'Dockerfile.ingress']) {
+      expect(classifyChangedFiles([filePath])).toEqual({
+        ...noChecks,
+        ingress: true,
+        docker: true,
+      });
+    }
+  });
+
+  it('runs Supervisor and Docker checks for Runtime packaging changes', () => {
+    for (const filePath of [
+      'Dockerfile.runtime',
+      'docker/runtime/entrypoint.sh',
+      'docker/runtime/config.seed.yaml',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({
+        ...noChecks,
+        runtime_supervisor: true,
+        docker: true,
+      });
+    }
   });
 
   it('runs Supervisor checks when its architecture gate or fixtures change', () => {
@@ -170,10 +197,17 @@ describe('PR check classifier', () => {
   });
 
   it('runs Docker validation for Compose changes', () => {
-    expect(classifyChangedFiles(['docker-compose.manager.yml'])).toEqual({
-      ...noChecks,
-      docker: true,
-    });
+    for (const filePath of [
+      'docker-compose.yml',
+      'docker-compose.manager.yml',
+      'bin/ci/runtime12-docker-smoke.sh',
+      'bin/ci/validate-runtime12-compose.mjs',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({
+        ...noChecks,
+        docker: true,
+      });
+    }
   });
 
   it('runs Node and Docker checks for root dependency changes', () => {
@@ -197,6 +231,7 @@ describe('PR check classifier', () => {
         frontend: true,
         manager_server: true,
         runtime_supervisor: true,
+        ingress: true,
         windows_sqlite: true,
         native_control: true,
         docker: true,

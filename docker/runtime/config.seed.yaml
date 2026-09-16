@@ -1,0 +1,18 @@
+# Runtime 12 bootstrap seed. It contains no product or provider credentials.
+host: "0.0.0.0"
+port: 8317
+
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: true
+
+auth-dir: "/runtime/gateway/auth"
+api-keys: []
+
+plugins:
+  enabled: false
+  dir: "/runtime/gateway/plugins"
+
+logging-to-file: false
+usage-statistics-enabled: false
