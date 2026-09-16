@@ -17,9 +17,11 @@ import (
 )
 
 const (
-	Version       = "v1"
-	handshakePath = "/v1/runtime/handshake"
-	statusPath    = "/v1/runtime/status"
+	Version                    = "v1"
+	ArtifactObservationHeader  = "X-CPAMP-Runtime-Features"
+	ArtifactObservationFeature = "active-gateway-artifact-v1"
+	handshakePath              = "/v1/runtime/handshake"
+	statusPath                 = "/v1/runtime/status"
 )
 
 type Config struct {
@@ -165,7 +167,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var activeArtifact *artifact.Observation
 		var observedVersion string
-		if h.artifact != nil {
+		if h.artifact != nil && requestsFeature(r, ArtifactObservationFeature) {
 			observed := h.artifact.Observation()
 			if observed != nil && observed.Validate() == nil {
 				activeArtifact = observed
@@ -189,6 +191,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case restartPath:
 		h.submitRestart(w, r)
 	}
+}
+
+func requestsFeature(r *http.Request, feature string) bool {
+	for _, value := range r.Header.Values(ArtifactObservationHeader) {
+		for _, candidate := range strings.Split(value, ",") {
+			if strings.TrimSpace(candidate) == feature {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *handler) capabilities() []string {

@@ -77,8 +77,9 @@ type fileOpener func(string) (io.ReadCloser, error)
 type fileReader func(string) ([]byte, error)
 
 // Observer caches an observation produced at an owning lifecycle boundary.
-// Status polling only reads this cache; a future owning switch path can call
-// Refresh after it has atomically selected a new executable.
+// Supervisor startup and every eligible child spawn refresh it; status polling
+// only reads this cache. A future owning switch path can also refresh after it
+// has atomically selected a new executable.
 type Observer struct {
 	executablePath string
 	manifestPath   string

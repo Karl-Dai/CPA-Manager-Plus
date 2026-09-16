@@ -265,14 +265,34 @@ the freshly calculated executable digest. A missing, malformed, or mismatched
 manifest never causes version fabrication or automatic manifest repair; the
 exact digest may remain observable without a trusted version.
 
-Supervisor resolves and hashes the configured executable at an owning bounded
-lifecycle point and serves normal status polls from an immutable cache. A
-future Supervisor-owned switch path refreshes that observation after selecting
-new bytes. Manager consumes the structured private Runtime observation;
-Ingress has no role. Embedded `CPAObservedVersion`, when populated for wire
-compatibility, is only a projection of the same trusted artifact observation
-and is not a second authority. External mode does not fabricate an exact active
-artifact identity from its authenticated Management API version.
+Supervisor resolves and hashes the configured executable at startup and again
+inside the child ownership gate immediately before every eligible OS spawn.
+Typed Start, Restart replacement, and automatic recovery therefore refresh the
+cache from the bytes that path is about to execute; a rejected/conflicting
+Start and normal status polling do not touch the filesystem. If a spawn-boundary
+observation cannot read the executable, the old identity and version are
+cleared before the spawn attempt rather than retained as current truth. A future
+Supervisor-owned switch path also refreshes after selecting new bytes.
+
+`activeGatewayArtifact` is an additive Runtime Protocol v1 observation with
+explicit feature negotiation. A Manager that understands it sends:
+
+```text
+X-CPAMP-Runtime-Features: active-gateway-artifact-v1
+```
+
+Only that authenticated status request receives `activeGatewayArtifact` and
+its `CPAObservedVersion` projection. Without the opt-in, Supervisor returns the
+legacy v1 status shape with an empty observed version, so a Runtime14 Manager's
+strict unknown-field decoder remains valid. A new Manager sends the header to
+an old Supervisor safely because unknown request headers are ignored. Unknown
+feature tokens are ignored and do not alter protocol versioning.
+
+Manager consumes the negotiated structured private Runtime observation;
+Ingress has no role. Embedded `CPAObservedVersion`, when populated, is only a
+projection of the same trusted artifact observation and is not a second
+authority. External mode does not fabricate an exact active artifact identity
+from its authenticated Management API version.
 
 `RuntimeGeneration` and active artifact identity are orthogonal: a Supervisor
 incarnation change may rotate the generation while unchanged executable bytes

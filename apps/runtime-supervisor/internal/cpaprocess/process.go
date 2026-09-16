@@ -69,6 +69,7 @@ const exitEventBuffer = 1
 // Its zero value is ready to use; it must not be copied after first use.
 type Manager struct {
 	mu           sync.Mutex
+	beforeSpawn  func()
 	cmd          *exec.Cmd
 	waitDone     chan struct{}
 	stopTarget   *exec.Cmd
@@ -76,6 +77,15 @@ type Manager struct {
 	observation  Observation
 	exitEvents   chan ExitEvent
 	exitPublish  sync.Mutex
+}
+
+// NewManager creates one Supervisor-incarnation child owner. beforeSpawn runs
+// synchronously after Start has proved that a new child may be created and
+// immediately before the configured executable is handed to the OS. It lets
+// the Supervisor refresh cached executable facts without making status polling
+// or rejected duplicate Start calls touch the filesystem.
+func NewManager(beforeSpawn func()) *Manager {
+	return &Manager{beforeSpawn: beforeSpawn}
 }
 
 // StopTarget is an opaque reservation for the exact child owned when Stop was
@@ -119,9 +129,14 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 			return m.observeLocked(), fmt.Errorf("%w: arguments must not contain NUL", ErrInvalidSpec)
 		}
 	}
-
 	cmd := exec.Command(spec.Executable, spec.Args...)
 	cmd.Env = childEnvironment(os.Environ(), runtime.GOOS == "windows")
+	if err := ctx.Err(); err != nil {
+		return m.observeLocked(), err
+	}
+	if m.beforeSpawn != nil {
+		m.beforeSpawn()
+	}
 	if err := ctx.Err(); err != nil {
 		return m.observeLocked(), err
 	}

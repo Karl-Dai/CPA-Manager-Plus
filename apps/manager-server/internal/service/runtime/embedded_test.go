@@ -105,6 +105,9 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 				if got := r.Header.Get("Accept"); got != "application/json" {
 					t.Errorf("Accept = %q", got)
 				}
+				if got := r.Header.Get(embeddedRuntimeFeaturesHeader); got != embeddedArtifactFeature {
+					t.Errorf("%s = %q", embeddedRuntimeFeaturesHeader, got)
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(test.response))
 			}))

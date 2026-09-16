@@ -108,7 +108,10 @@ runtime_get_from_manager() {
   local request_path="$1"
   "${compose[@]}" exec -T cpamp-manager sh -ec '
     token="$(cat /run/cpamp/runtime-secret/token)"
-    wget -qO- --timeout=4 --header="Authorization: Bearer ${token}" "http://cpamp-runtime:9081${1}"
+    wget -qO- --timeout=4 \
+      --header="Authorization: Bearer ${token}" \
+      --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
+      "http://cpamp-runtime:9081${1}"
   ' sh "${request_path}"
 }
 
@@ -120,7 +123,10 @@ runtime_get_local() {
     --entrypoint sh \
     seakee/cpa-manager-plus:latest -ec '
     token="$(cat /run/cpamp/runtime-secret/token)"
-    wget -qO- -T 4 --header="Authorization: Bearer ${token}" "http://127.0.0.1:9081${1}"
+    wget -qO- -T 4 \
+      --header="Authorization: Bearer ${token}" \
+      --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
+      "http://127.0.0.1:9081${1}"
   ' sh "${request_path}"
 }
 

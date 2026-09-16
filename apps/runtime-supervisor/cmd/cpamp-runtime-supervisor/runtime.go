@@ -54,10 +54,13 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 	runtime := &runtimeHandler{}
 	if cfg.journalPath != "" {
 		artifactObserver := artifact.NewObserver(cfg.cpaExecutable, cfg.cpaArtifactManifest)
-		if err := artifactObserver.Refresh(); err != nil {
-			log.Printf("active Gateway artifact metadata is incomplete: %v", err)
+		refreshArtifact := func() {
+			if err := artifactObserver.Refresh(); err != nil {
+				log.Printf("active Gateway artifact metadata is incomplete: %v", err)
+			}
 		}
-		child := &cpaprocess.Manager{}
+		refreshArtifact()
+		child := cpaprocess.NewManager(refreshArtifact)
 		observer, err := readiness.New(child, cfg.cpaAddr)
 		if err != nil {
 			return nil, err

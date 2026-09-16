@@ -17,6 +17,8 @@ import (
 
 const (
 	embeddedRuntimeProtocolVersion = "v1"
+	embeddedRuntimeFeaturesHeader  = "X-CPAMP-Runtime-Features"
+	embeddedArtifactFeature        = "active-gateway-artifact-v1"
 	embeddedRuntimeStatusPath      = "/v1/runtime/status"
 	embeddedRuntimeStartPath       = "/v1/runtime/operations/start"
 	embeddedRuntimeStopPath        = "/v1/runtime/operations/stop"
@@ -122,6 +124,7 @@ func (c *EmbeddedClient) Status(ctx context.Context) (model.RuntimeObservedStatu
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(embeddedRuntimeFeaturesHeader, embeddedArtifactFeature)
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {

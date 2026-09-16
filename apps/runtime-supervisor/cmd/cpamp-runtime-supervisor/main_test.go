@@ -473,6 +473,9 @@ func requestRuntime(t *testing.T, handler http.Handler, path string) runtimeResp
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set("Authorization", "Bearer runtime-token")
+	if path == "/v1/runtime/status" {
+		req.Header.Set(protocol.ArtifactObservationHeader, protocol.ArtifactObservationFeature)
+	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
