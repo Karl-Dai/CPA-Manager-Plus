@@ -201,12 +201,36 @@ describe('PR check classifier', () => {
       'docker-compose.yml',
       'docker-compose.manager.yml',
       'bin/ci/runtime12-docker-smoke.sh',
+      'bin/ci/runtime14-failure-e2e.sh',
       'bin/ci/validate-runtime12-compose.mjs',
     ]) {
       expect(classifyChangedFiles([filePath])).toEqual({
         ...noChecks,
         docker: true,
       });
+    }
+  });
+
+  it('runs Docker failure validation for every combined Runtime lifecycle family', () => {
+    for (const filePath of [
+      'apps/ingress/internal/ingress/proxy.go',
+      'apps/manager-server/internal/service/runtime/reconciler.go',
+      'apps/manager-server/internal/repository/setting/repository.go',
+      'apps/manager-server/internal/service/bootstrap/service.go',
+      'apps/runtime-supervisor/internal/protocol/handler.go',
+      'apps/runtime-supervisor/internal/lifecycle/recovery.go',
+      'apps/runtime-supervisor/internal/readiness/readiness.go',
+      'apps/runtime-supervisor/internal/journal/store.go',
+      'apps/runtime-supervisor/internal/cpaprocess/process.go',
+      'docker/runtime/entrypoint.sh',
+      'Dockerfile.manager-server',
+      'Dockerfile.ingress',
+      'Dockerfile.runtime',
+      'docker-compose.yml',
+      'bin/ci/runtime12-docker-smoke.sh',
+      'bin/ci/runtime14-failure-e2e.sh',
+    ]) {
+      expect(classifyChangedFiles([filePath]).docker, filePath).toBe(true);
     }
   });
 

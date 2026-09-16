@@ -122,6 +122,32 @@ describe('GitHub Actions workflow integrity', () => {
     expect(requiredJob).toContain('"Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"');
   });
 
+  it('runs Runtime14 failure validation after the focused Docker smoke', () => {
+    const dockerJob = jobBlock(readWorkflow('pr-check.yml'), 'docker-build');
+    const focusedSmoke = dockerJob.indexOf('run: bin/ci/runtime12-docker-smoke.sh');
+    const failureE2E = dockerJob.indexOf('run: bin/ci/runtime14-failure-e2e.sh');
+
+    expect(focusedSmoke).toBeGreaterThan(-1);
+    expect(failureE2E).toBeGreaterThan(focusedSmoke);
+    expect(dockerJob).toContain("CPAMP_RUNTIME14_PORT: '18317'");
+    expect(dockerJob).toContain("CPAMP_RUNTIME14_SKIP_BUILD: 'true'");
+  });
+
+  it('keeps Manager Runtime race, vet, and Windows portability gates', () => {
+    const workflow = readWorkflow('pr-check.yml');
+    const managerJob = jobBlock(workflow, 'manager-server');
+    const windowsJob = jobBlock(workflow, 'manager-server-windows-sqlite');
+
+    expect(managerJob).toContain(
+      'go test -race ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap'
+    );
+    expect(managerJob).toContain('run: go vet ./...');
+    expect(windowsJob).toContain(
+      'go test ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap'
+    );
+    expect(windowsJob).toContain('run: go build ./cmd/cpa-manager-plus');
+  });
+
   it('fails Required checks when Supervisor validation fails or is cancelled', () => {
     const requiredJob = jobBlock(readWorkflow('pr-check.yml'), 'required');
     const script = requiredJob.split('        run: |\n')[1].replace(/^ {10}/gm, '');

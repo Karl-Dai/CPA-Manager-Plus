@@ -77,6 +77,7 @@ const triggersDocker = (filePath) =>
   startsWithPath(filePath, 'apps/ingress') ||
   startsWithPath(filePath, 'docker') ||
   filePath.startsWith('bin/ci/runtime12-') ||
+  filePath.startsWith('bin/ci/runtime14-') ||
   filePath === 'bin/ci/validate-runtime12-compose.mjs' ||
   filePath === 'Dockerfile.manager-server' ||
   filePath === 'Dockerfile.ingress' ||

@@ -131,6 +131,14 @@ jobs:
         working-directory: apps/manager-server
         run: go test ./...
 
+      - name: Race test Runtime ownership paths
+        working-directory: apps/manager-server
+        run: go test -race ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap
+
+      - name: Vet
+        working-directory: apps/manager-server
+        run: go vet ./...
+
   runtime-supervisor:
     name: Runtime Supervisor
     needs: changes
@@ -255,6 +263,14 @@ jobs:
         working-directory: apps/manager-server
         run: go test ./internal/repository/sqlite
 
+      - name: Test Runtime portability
+        working-directory: apps/manager-server
+        run: go test ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap
+
+      - name: Build Manager Server
+        working-directory: apps/manager-server
+        run: go build ./cmd/cpa-manager-plus
+
   native-control:
     name: Native Control (${{ matrix.os }})
     needs: changes
@@ -357,6 +373,12 @@ jobs:
           CPAMP_SMOKE_PORT: '18317'
           CPAMP_SMOKE_SKIP_BUILD: 'true'
         run: bin/ci/runtime12-docker-smoke.sh
+
+      - name: Run Runtime failure-behavior E2E
+        env:
+          CPAMP_RUNTIME14_PORT: '18317'
+          CPAMP_RUNTIME14_SKIP_BUILD: 'true'
+        run: bin/ci/runtime14-failure-e2e.sh
 
   demo-docs:
     name: Demo and Docs
