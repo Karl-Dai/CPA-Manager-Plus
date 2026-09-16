@@ -221,24 +221,38 @@ assert_public_unavailable() {
   fail "public ${path} remained available during the injected outage"
 }
 
-copy_sqlite_snapshot() {
+copy_sqlite_snapshot() (
+  set -euo pipefail
   local service="$1"
   local source="$2"
   local label="$3"
   local destination="${snapshot_root}/${label}"
-  local id base suffix
+  local id base
+  local paused_id=""
+
+  unpause_snapshot_owner() {
+    if [ -n "${paused_id}" ]; then
+      docker unpause "${paused_id}" >/dev/null 2>&1 || true
+    fi
+  }
+
+  trap unpause_snapshot_owner EXIT
+  trap 'exit 1' HUP INT TERM
+
   mkdir -p "${destination}"
   id="$(container_id "${service}")"
   base="${source##*/}"
-  for suffix in '' '-wal' '-shm'; do
-    if docker exec "${id}" sh -ec 'test -e "$1"' sh "${source}${suffix}"; then
-      docker cp "${id}:${source}${suffix}" "${destination}/${base}${suffix}" >/dev/null
-    elif [ -z "${suffix}" ]; then
-      fail "required SQLite database ${source} is missing in ${service}"
-    fi
-  done
+
+  docker pause "${id}" >/dev/null
+  paused_id="${id}"
+  docker cp "${id}:${source}" "${destination}/${base}" >/dev/null
+  docker cp "${id}:${source}-wal" "${destination}/${base}-wal" >/dev/null
+  docker unpause "${id}" >/dev/null
+  paused_id=""
+  trap - EXIT HUP INT TERM
+
   printf '%s' "${destination}/${base}"
-}
+)
 
 snapshot_runtime_journal() {
   copy_sqlite_snapshot cpamp-runtime /runtime/supervisor/operations.sqlite "$1"
