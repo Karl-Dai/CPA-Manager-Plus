@@ -87,6 +87,46 @@ func TestInvalidStartSpec(t *testing.T) {
 	}
 }
 
+func TestBeforeSpawnRunsOnlyAtEligibleSpawnBoundary(t *testing.T) {
+	var observations int
+	manager := NewManager(func() { observations++ })
+	if _, err := manager.Start(t.Context(), StartSpec{}); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("invalid Start() error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := manager.Start(canceled, StartSpec{Executable: "unused"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Start() error = %v", err)
+	}
+	if observations != 0 {
+		t.Fatalf("rejected Starts observed %d spawn boundaries", observations)
+	}
+
+	first := newHelper(t, manager, 0)
+	started := startHelper(t, manager, first)
+	if observations != 1 {
+		t.Fatalf("first spawn observations = %d, want 1", observations)
+	}
+	if _, err := manager.Start(t.Context(), first.spec); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("duplicate Start() error = %v", err)
+	}
+	if observations != 1 {
+		t.Fatalf("conflicting Start observed %d spawn boundaries", observations)
+	}
+	first.release(t)
+	if got := waitForExit(t, manager); got.InstanceID != started.InstanceID {
+		t.Fatalf("first exit = %+v, want instance %d", got, started.InstanceID)
+	}
+
+	second := newHelper(t, manager, 0)
+	startHelper(t, manager, second)
+	if observations != 2 {
+		t.Fatalf("replacement spawn observations = %d, want 2", observations)
+	}
+	second.release(t)
+	assertExit(t, waitForExit(t, manager), 0)
+}
+
 func TestConcurrentStartSpawnsExactlyOneChild(t *testing.T) {
 	t.Parallel()
 	var manager Manager
@@ -208,7 +248,7 @@ func TestStartFiltersOnlySupervisorPrivateEnvironment(t *testing.T) {
 	private := []string{
 		"CPAMP_RUNTIME_TOKEN", "CPAMP_RUNTIME_JOURNAL_PATH", "CPAMP_RUNTIME_IDENTITY",
 		"CPAMP_RUNTIME_ADDR", "CPAMP_RUNTIME_GENERATION", "CPAMP_CPA_EXECUTABLE",
-		"CPAMP_RUNTIME_FUTURE_SECRET", "CPAMP_RUNTIME_CPA_ADDR",
+		"CPAMP_CPA_ARTIFACT_MANIFEST", "CPAMP_RUNTIME_FUTURE_SECRET", "CPAMP_RUNTIME_CPA_ADDR",
 	}
 	for _, key := range private {
 		t.Setenv(key, "test-only-private-value")
@@ -287,6 +327,7 @@ func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
 			name: "Unix names are case sensitive",
 			parent: []string{
 				"CPAMP_RUNTIME_TOKEN=secret", "CPAMP_RUNTIME_FUTURE_SECRET=secret", "CPAMP_CPA_EXECUTABLE=/cpa",
+				"CPAMP_CPA_ARTIFACT_MANIFEST=/trusted/artifact.json",
 				"CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317",
 				"cpamp_runtime_token=ordinary", "cpamp_cpa_executable=ordinary", "CPAMP_RUNTIME=ordinary",
 				"CPAMP_DEPLOYMENT_SENTINEL=ordinary", "CPAMP_CPA_EXECUTABLE_SUFFIX=ordinary",

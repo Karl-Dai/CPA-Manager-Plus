@@ -16,7 +16,11 @@ RUN set -eu; \
     printf '%s  %s\n' "$asset_sha256" "/tmp/${asset_name}" | sha256sum -c -; \
     mkdir -p /out; \
     tar -xOzf "/tmp/${asset_name}" cli-proxy-api > /out/cli-proxy-api; \
-    chmod 0755 /out/cli-proxy-api
+    chmod 0755 /out/cli-proxy-api; \
+    binary_sha256="$(sha256sum /out/cli-proxy-api | awk '{print $1}')"; \
+    printf '{"schemaVersion":1,"engine":"cpa","version":"%s","artifactId":"sha256:%s"}\n' \
+      "$cpa_version" "$binary_sha256" > /out/cpa-artifact.json; \
+    chmod 0444 /out/cpa-artifact.json
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS supervisor-build
 
@@ -37,6 +41,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=supervisor-build /out/cpamp-runtime-supervisor /usr/local/bin/cpamp-runtime-supervisor
 COPY --from=cpa-download /out/cli-proxy-api /usr/local/bin/cli-proxy-api
+COPY --from=cpa-download /out/cpa-artifact.json /usr/local/share/cpamp/runtime/cpa-artifact.json
 COPY docker/runtime/entrypoint.sh /usr/local/bin/cpamp-runtime-entrypoint
 COPY docker/runtime/config.seed.yaml /usr/local/share/cpamp/runtime/config.seed.yaml
 
@@ -44,7 +49,8 @@ ENV CPAMP_RUNTIME_ADDR=0.0.0.0:9081 \
     CPAMP_RUNTIME_IDENTITY=embedded-default \
     CPAMP_RUNTIME_JOURNAL_PATH=/runtime/supervisor/operations.sqlite \
     CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317 \
-    CPAMP_CPA_EXECUTABLE=/usr/local/bin/cli-proxy-api
+    CPAMP_CPA_EXECUTABLE=/usr/local/bin/cli-proxy-api \
+    CPAMP_CPA_ARTIFACT_MANIFEST=/usr/local/share/cpamp/runtime/cpa-artifact.json
 
 EXPOSE 8317 9081
 ENTRYPOINT ["/usr/local/bin/cpamp-runtime-entrypoint"]

@@ -17,6 +17,7 @@ import (
 )
 
 const testRuntimeToken = "test-runtime-token"
+const testArtifactID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestNewEmbeddedClientDisablesEnvironmentProxy(t *testing.T) {
 	client := NewEmbeddedClient("http://cpamp-runtime:18318", testRuntimeToken)
@@ -38,6 +39,7 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 		response     string
 		wantState    model.RuntimeState
 		wantVersion  model.CPAObservedVersion
+		wantArtifact *model.ActiveGatewayArtifact
 		wantCaps     model.RuntimeCapabilities
 		wantSupports model.RuntimeCapability
 		wantRecovery *model.RuntimeRecoveryObservation
@@ -49,10 +51,11 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 			wantCaps:  model.RuntimeCapabilities{},
 		},
 		{
-			name:         "ready with CPA version and capabilities",
-			response:     `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"v7.2.130","capabilities":["capability-a","capability-b"]}`,
+			name:         "ready with trusted CPA artifact and capabilities",
+			response:     `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"7.3.3","activeGatewayArtifact":{"engine":"cpa","artifactId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"7.3.3"},"capabilities":["capability-a","capability-b"]}`,
 			wantState:    model.RuntimeStateReady,
-			wantVersion:  "v7.2.130",
+			wantVersion:  "7.3.3",
+			wantArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: testArtifactID, Version: "7.3.3"},
 			wantCaps:     model.RuntimeCapabilities{"capability-a", "capability-b"},
 			wantSupports: "capability-b",
 		},
@@ -71,11 +74,11 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 			wantCaps:  model.RuntimeCapabilities{},
 		},
 		{
-			name:        "nonempty observed version is preserved verbatim",
-			response:    `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":" custom build ","capabilities":[]}`,
-			wantState:   model.RuntimeStateReady,
-			wantVersion: " custom build ",
-			wantCaps:    model.RuntimeCapabilities{},
+			name:         "exact artifact may omit untrusted display version",
+			response:     `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"","activeGatewayArtifact":{"engine":"cpa","artifactId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"capabilities":[]}`,
+			wantState:    model.RuntimeStateReady,
+			wantArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: testArtifactID},
+			wantCaps:     model.RuntimeCapabilities{},
 		},
 		{
 			name:      "authoritative offline observation",
@@ -102,6 +105,9 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 				if got := r.Header.Get("Accept"); got != "application/json" {
 					t.Errorf("Accept = %q", got)
 				}
+				if got := r.Header.Get(embeddedRuntimeFeaturesHeader); got != embeddedArtifactFeature {
+					t.Errorf("%s = %q", embeddedRuntimeFeaturesHeader, got)
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(test.response))
 			}))
@@ -125,6 +131,9 @@ func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 			}
 			if !reflect.DeepEqual(status.Recovery, test.wantRecovery) {
 				t.Fatalf("Status() recovery = %#v, want %#v", status.Recovery, test.wantRecovery)
+			}
+			if !reflect.DeepEqual(status.ActiveGatewayArtifact, test.wantArtifact) {
+				t.Fatalf("Status() artifact = %#v, want %#v", status.ActiveGatewayArtifact, test.wantArtifact)
 			}
 			if test.wantSupports != "" && !status.Capabilities.Supports(test.wantSupports) {
 				t.Fatalf("Status() capabilities do not support %q", test.wantSupports)
@@ -219,6 +228,11 @@ func TestEmbeddedClientStatusRejectsInvalidProtocolResponse(t *testing.T) {
 		{name: "invalid runtime state", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"broken","capabilities":[]}`},
 		{name: "invalid recovery state", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","capabilities":[],"recovery":{"state":"retrying","attemptsRemaining":1}}`},
 		{name: "invalid recovery attempts", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","capabilities":[],"recovery":{"state":"armed","attemptsRemaining":4}}`},
+		{name: "legacy Embedded version without trusted artifact", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"7.3.3","capabilities":[]}`},
+		{name: "artifact version projection mismatch", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"7.3.2","activeGatewayArtifact":{"engine":"cpa","artifactId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"7.3.3"},"capabilities":[]}`},
+		{name: "noncanonical artifact ID", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"","activeGatewayArtifact":{"engine":"cpa","artifactId":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"capabilities":[]}`},
+		{name: "unsupported artifact engine", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":"","activeGatewayArtifact":{"engine":"other","artifactId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"capabilities":[]}`},
+		{name: "artifact version surrounding whitespace", response: `{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"ready","cpaObservedVersion":" 7.3.3 ","activeGatewayArtifact":{"engine":"cpa","artifactId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":" 7.3.3 "},"capabilities":[]}`},
 	}
 
 	for _, test := range tests {

@@ -243,6 +243,82 @@ Explicit Stop disables recovery after durable running evidence and before expect
 
 Authenticated Runtime status may expose the recovery observation `inactive`, `armed`, `recovering`, or `manual_intervention` with attempts remaining in `0..3`. This observation is orthogonal to Runtime availability state and has no side effect. Shutdown closes recovery admission with public lifecycle admission, cancels pending timers, rechecks closure after acquiring the shared gate, and drains an already durably accepted automatic operation before closing the journal. Supervisor restart creates no recovery lease, restores no historical lease, and does not auto-start or adopt a child from prior journal evidence.
 
+#### Active Gateway artifact identity and future update fence
+
+Runtime Supervisor owns the truthful active Embedded Gateway artifact
+observation. The active artifact is the configured CPA executable that a typed
+Start would execute. Its authoritative identity is content-derived from the
+exact executable bytes:
+
+```text
+sha256:<64 lowercase hex characters>
+```
+
+Human version labels, Git or image tags, archive checksums, file paths,
+size/mtime, and process output are not artifact identity and MUST NOT be used as
+update-fencing authority. The pinned upstream archive checksum remains a
+separate build/supply-chain verification. CPAMP packaging MAY emit a narrow,
+CPAMP-owned trusted manifest after extraction that binds `engine=cpa`, a
+display version, and the exact extracted executable digest. Supervisor trusts
+that version only when the manifest is valid and its artifact ID exactly equals
+the freshly calculated executable digest. A missing, malformed, or mismatched
+manifest never causes version fabrication or automatic manifest repair; the
+exact digest may remain observable without a trusted version.
+
+Supervisor resolves and hashes the configured executable at startup and again
+inside the child ownership gate immediately before every eligible OS spawn.
+Typed Start, Restart replacement, and automatic recovery therefore refresh the
+cache from the bytes that path is about to execute; a rejected/conflicting
+Start and normal status polling do not touch the filesystem. If a spawn-boundary
+observation cannot read the executable, the old identity and version are
+cleared before the spawn attempt rather than retained as current truth. A future
+Supervisor-owned switch path also refreshes after selecting new bytes.
+
+`activeGatewayArtifact` is an additive Runtime Protocol v1 observation with
+explicit feature negotiation. A Manager that understands it sends:
+
+```text
+X-CPAMP-Runtime-Features: active-gateway-artifact-v1
+```
+
+Only that authenticated status request receives `activeGatewayArtifact` and
+its `CPAObservedVersion` projection. Without the opt-in, Supervisor returns the
+legacy v1 status shape with an empty observed version, so a Runtime14 Manager's
+strict unknown-field decoder remains valid. A new Manager sends the header to
+an old Supervisor safely because unknown request headers are ignored. Unknown
+feature tokens are ignored and do not alter protocol versioning.
+
+Manager consumes the negotiated structured private Runtime observation;
+Ingress has no role. Embedded `CPAObservedVersion`, when populated, is only a
+projection of the same trusted artifact observation and is not a second
+authority. External mode does not fabricate an exact active artifact identity
+from its authenticated Management API version.
+
+`RuntimeGeneration` and active artifact identity are orthogonal: a Supervisor
+incarnation change may rotate the generation while unchanged executable bytes
+retain the same artifact ID, and lifecycle restart/recovery from the same bytes
+does not change that ID.
+
+Every future updater mutation MUST carry an
+`expectedActiveArtifactId` obtained from a fresh Runtime observation.
+Supervisor remains the final enforcing authority and MUST compare it with the
+freshly observed current artifact ID before durable update intent or any
+privileged update side effect. Same version with a different digest, a missing
+actual identity, or any mismatch fails closed with no download, staging,
+switch, rename, replacement, or process side effect. The mutation ordering is:
+
+```text
+auth
+-> strict decode and basic validation
+-> RuntimeIdentity fence
+-> RuntimeGeneration fence
+-> cross-generation operation-ID lookup
+-> expected active-artifact fence
+-> update-specific preconditions
+-> durable intent
+-> privileged update side effect
+```
+
 ### 8. Platform topology
 
 The logical architecture is identical across platforms. Platform differences are deployment adapters only.
@@ -377,3 +453,4 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 10. For one Runtime identity, durable operation ID idempotency spans Supervisor generations: replaying the same logical request never executes its side effect twice, and conflicting reuse fails closed.
 11. Ingress owns no product configuration or lifecycle authority, persists no product state, and receives no Runtime, Manager, CPA Management, or provider credential.
 12. Container/bootstrap startup may create internal transport and seed state, but MUST NOT infer desired running state or start CPA outside a typed durable lifecycle mutation.
+13. Exact active executable SHA-256 is Embedded update-fencing authority; human version metadata is trusted only when CPAMP-owned metadata binds it to that exact digest, and future updater side effects require a Supervisor-enforced expected-active-artifact fence.

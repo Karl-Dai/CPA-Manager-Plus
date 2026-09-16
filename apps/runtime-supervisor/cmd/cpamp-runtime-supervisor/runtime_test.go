@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,260 @@ import (
 )
 
 const startHelperName = "cpamp-start-test-child.exe"
+
+func TestActiveArtifactObservationIsCachedAndOrthogonalToRuntimeGeneration(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "gateway")
+	manifest := filepath.Join(directory, "artifact.json")
+	executableBytes := []byte("stable-executable-bytes")
+	if err := os.WriteFile(executable, executableBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(executableBytes)
+	artifactID := fmt.Sprintf("sha256:%x", digest)
+	manifestJSON := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":"7.3.3","artifactId":%q}`, artifactID)
+	if err := os.WriteFile(manifest, []byte(manifestJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadTestConfig(t, fixedGeneration(41))
+	cfg.journalPath = filepath.Join(directory, "operations.sqlite")
+	cfg.cpaExecutable = executable
+	cfg.cpaArtifactManifest = manifest
+	cfg.cpaAddr = unreadyCPAAddr(t)
+	first, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstStatus := requestRuntime(t, first, "/v1/runtime/status")
+	if firstStatus.RuntimeGeneration != 41 || firstStatus.CPAObservedVersion != "7.3.3" ||
+		firstStatus.ActiveGatewayArtifact == nil ||
+		firstStatus.ActiveGatewayArtifact.Engine != "cpa" ||
+		firstStatus.ActiveGatewayArtifact.ArtifactID != artifactID ||
+		firstStatus.ActiveGatewayArtifact.Version != "7.3.3" {
+		t.Fatalf("first artifact observation = %+v", firstStatus)
+	}
+
+	// Status is a cache read. Even external tampering after the owning startup
+	// observation cannot turn polling into repeated full-file hashing.
+	if err := os.WriteFile(executable, []byte("tampered-after-startup"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		status := requestRuntime(t, first, "/v1/runtime/status")
+		if status.ActiveGatewayArtifact == nil || status.ActiveGatewayArtifact.ArtifactID != artifactID {
+			t.Fatalf("status rehashed executable instead of reading cache: %+v", status)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(executable, executableBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.runtimeGeneration = 42
+	second, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	secondStatus := requestRuntime(t, second, "/v1/runtime/status")
+	if secondStatus.RuntimeGeneration != 42 || secondStatus.ActiveGatewayArtifact == nil ||
+		secondStatus.ActiveGatewayArtifact.ArtifactID != artifactID {
+		t.Fatalf("new generation changed stable artifact identity: %+v", secondStatus)
+	}
+}
+
+func TestActiveArtifactRefreshesAtRestartSpawnBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("atomic executable replacement while running is a Unix regression")
+	}
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "gateway")
+	replacement := filepath.Join(directory, "gateway-next")
+	spawnLog := filepath.Join(directory, "artifact-spawns")
+	manifest := filepath.Join(directory, "artifact.json")
+	bytesA := writeArtifactGateway(t, executable, spawnLog, "A")
+	artifactA := exactArtifactID(bytesA)
+	manifestJSON := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":"version-a","artifactId":%q}`, artifactA)
+	if err := os.WriteFile(manifest, []byte(manifestJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadTestConfig(t, fixedGeneration(41))
+	cfg.journalPath = filepath.Join(directory, "operations.sqlite")
+	cfg.cpaExecutable = executable
+	cfg.cpaArtifactManifest = manifest
+	cfg.cpaAddr = unreadyCPAAddr(t)
+	handler, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = handler.Close()
+		killArtifactGateways(spawnLog)
+	})
+
+	if started := runtimeStart(handler, t.Context(), "start-a", 41); started.Code != http.StatusOK {
+		t.Fatalf("Start A = %d, %s", started.Code, started.Body.String())
+	}
+	awaitArtifactGatewaySpawns(t, spawnLog, 1)
+	statusA := requestRuntime(t, handler, "/v1/runtime/status")
+	if statusA.ActiveGatewayArtifact == nil || statusA.ActiveGatewayArtifact.ArtifactID != artifactA ||
+		statusA.ActiveGatewayArtifact.Version != "version-a" || statusA.CPAObservedVersion != "version-a" {
+		t.Fatalf("spawned A artifact = %+v", statusA)
+	}
+
+	bytesB := writeArtifactGateway(t, replacement, spawnLog, "B")
+	artifactB := exactArtifactID(bytesB)
+	if artifactA == artifactB {
+		t.Fatal("test Gateway artifacts unexpectedly have the same digest")
+	}
+	if err := os.Rename(replacement, executable); err != nil {
+		t.Fatal(err)
+	}
+	if cached := requestRuntime(t, handler, "/v1/runtime/status"); cached.ActiveGatewayArtifact == nil ||
+		cached.ActiveGatewayArtifact.ArtifactID != artifactA {
+		t.Fatalf("polling changed the pre-spawn cache: %+v", cached)
+	}
+	if restarted := runtimeRestart(handler, t.Context(), "restart-b", 41); restarted.Code != http.StatusOK {
+		t.Fatalf("Restart B = %d, %s", restarted.Code, restarted.Body.String())
+	}
+	awaitArtifactGatewaySpawns(t, spawnLog, 2)
+	statusB := requestRuntime(t, handler, "/v1/runtime/status")
+	if statusB.ActiveGatewayArtifact == nil || statusB.ActiveGatewayArtifact.ArtifactID != artifactB ||
+		statusB.ActiveGatewayArtifact.Version != "" || statusB.CPAObservedVersion != "" {
+		t.Fatalf("replacement spawn did not publish exact B without stale version: %+v", statusB)
+	}
+
+	if stopped := runtimeStop(handler, t.Context(), "stop-b", 41); stopped.Code != http.StatusOK {
+		t.Fatalf("Stop B = %d, %s", stopped.Code, stopped.Body.String())
+	}
+	if err := os.Remove(executable); err != nil {
+		t.Fatal(err)
+	}
+	if missing := runtimeStart(handler, t.Context(), "start-missing", 41); missing.Code == http.StatusOK {
+		t.Fatalf("missing executable Start unexpectedly succeeded: %s", missing.Body.String())
+	}
+	missingStatus := requestRuntime(t, handler, "/v1/runtime/status")
+	if missingStatus.ActiveGatewayArtifact != nil || missingStatus.CPAObservedVersion != "" {
+		t.Fatalf("failed spawn retained stale B identity: %+v", missingStatus)
+	}
+}
+
+func TestActiveArtifactRefreshesAtAutomaticRecoverySpawnBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("atomic executable replacement while running is a Unix regression")
+	}
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "gateway")
+	replacement := filepath.Join(directory, "gateway-next")
+	spawnLog := filepath.Join(directory, "artifact-spawns")
+	artifactA := exactArtifactID(writeArtifactGateway(t, executable, spawnLog, "A"))
+
+	cfg := loadTestConfig(t, fixedGeneration(41))
+	cfg.journalPath = filepath.Join(directory, "operations.sqlite")
+	cfg.cpaExecutable = executable
+	cfg.cpaAddr = unreadyCPAAddr(t)
+	handler, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = handler.Close()
+		killArtifactGateways(spawnLog)
+	})
+
+	if started := runtimeStart(handler, t.Context(), "start-a", 41); started.Code != http.StatusOK {
+		t.Fatalf("Start A = %d, %s", started.Code, started.Body.String())
+	}
+	pids := awaitArtifactGatewaySpawns(t, spawnLog, 1)
+	artifactB := exactArtifactID(writeArtifactGateway(t, replacement, spawnLog, "B"))
+	if err := os.Rename(replacement, executable); err != nil {
+		t.Fatal(err)
+	}
+	if cached := requestRuntime(t, handler, "/v1/runtime/status"); cached.ActiveGatewayArtifact == nil ||
+		cached.ActiveGatewayArtifact.ArtifactID != artifactA {
+		t.Fatalf("polling changed the pre-recovery cache: %+v", cached)
+	}
+	process, err := os.FindProcess(pids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	awaitArtifactGatewaySpawns(t, spawnLog, 2)
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		status := requestRuntime(t, handler, "/v1/runtime/status")
+		if status.Recovery != nil && status.Recovery.State == "armed" && status.Recovery.AttemptsRemaining == 2 {
+			if status.ActiveGatewayArtifact == nil || status.ActiveGatewayArtifact.ArtifactID != artifactB {
+				t.Fatalf("automatic recovery did not publish exact B: %+v", status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("automatic recovery did not settle with B: %+v", status)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if stopped := runtimeStop(handler, t.Context(), "stop-b", 41); stopped.Code != http.StatusOK {
+		t.Fatalf("Stop recovered B = %d, %s", stopped.Code, stopped.Body.String())
+	}
+}
+
+func writeArtifactGateway(t *testing.T, path, spawnLog, marker string) []byte {
+	t.Helper()
+	content := []byte(fmt.Sprintf("#!/bin/sh\nprintf '%%s %s\\n' \"$$\" >> %q\nexec sleep 30\n", marker, spawnLog))
+	if err := os.WriteFile(path, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+func exactArtifactID(content []byte) string {
+	digest := sha256.Sum256(content)
+	return fmt.Sprintf("sha256:%x", digest)
+}
+
+func awaitArtifactGatewaySpawns(t *testing.T, path string, count int) []int {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		encoded, err := os.ReadFile(path)
+		if err == nil {
+			lines := strings.Fields(string(encoded))
+			if len(lines) > count*2 {
+				t.Fatalf("artifact Gateway spawn fields = %q, want %d records", lines, count)
+			}
+			if len(lines) == count*2 {
+				pids := make([]int, count)
+				for index := range count {
+					if _, err := fmt.Sscan(lines[index*2], &pids[index]); err != nil || pids[index] <= 0 {
+						t.Fatalf("artifact Gateway PID %q: %v", lines[index*2], err)
+					}
+				}
+				return pids
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("did not observe %d artifact Gateway spawns", count)
+	return nil
+}
+
+func killArtifactGateways(path string) {
+	encoded, _ := os.ReadFile(path)
+	fields := strings.Fields(string(encoded))
+	for index := 0; index+1 < len(fields); index += 2 {
+		var pid int
+		if _, err := fmt.Sscan(fields[index], &pid); err == nil && pid > 0 {
+			if process, err := os.FindProcess(pid); err == nil {
+				_ = process.Kill()
+			}
+		}
+	}
+}
 
 // A private copy of the test executable selects the helper by filename. The
 // configured executable needs neither arguments nor inherited environment.
@@ -54,25 +309,30 @@ func TestMain(m *testing.M) {
 
 func TestLifecycleConfigurationIsAllOrNothing(t *testing.T) {
 	tests := []struct {
-		name, journal, executable string
-		wantError                 bool
+		name, journal, executable, manifest string
+		wantError                           bool
 	}{
-		{"read-only", "", "", false},
-		{"journal only", "operations.sqlite", "", true},
-		{"executable only", "", "cpa", true},
-		{"enabled", " operations.sqlite ", " cpa ", false},
-		{"invalid executable", "operations.sqlite", "cpa\x00", true},
+		{"read-only", "", "", "", false},
+		{"journal only", "operations.sqlite", "", "", true},
+		{"executable only", "", "cpa", "", true},
+		{"manifest only", "", "", "artifact.json", true},
+		{"enabled", " operations.sqlite ", " cpa ", " artifact.json ", false},
+		{"invalid executable", "operations.sqlite", "cpa\x00", "", true},
+		{"invalid manifest", "operations.sqlite", "cpa", "artifact\x00", true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			values := validConfigValues()
 			values["CPAMP_RUNTIME_JOURNAL_PATH"] = test.journal
 			values["CPAMP_CPA_EXECUTABLE"] = test.executable
+			values["CPAMP_CPA_ARTIFACT_MANIFEST"] = test.manifest
 			cfg, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
 			if (err != nil) != test.wantError {
 				t.Fatalf("loadConfig = %+v, %v", cfg, err)
 			}
-			if err == nil && (cfg.journalPath != strings.TrimSpace(test.journal) || cfg.cpaExecutable != strings.TrimSpace(test.executable)) {
+			if err == nil && (cfg.journalPath != strings.TrimSpace(test.journal) ||
+				cfg.cpaExecutable != strings.TrimSpace(test.executable) ||
+				cfg.cpaArtifactManifest != strings.TrimSpace(test.manifest)) {
 				t.Fatalf("lifecycle configuration = %+v", cfg)
 			}
 		})
@@ -607,7 +867,9 @@ func awaitSpawnCount(t *testing.T, directory string, count int) {
 						name = strings.ToUpper(name)
 					}
 					inherited[name] = true
-					if strings.HasPrefix(name, "CPAMP_RUNTIME_") || name == "CPAMP_CPA_EXECUTABLE" {
+					if strings.HasPrefix(name, "CPAMP_RUNTIME_") ||
+						name == "CPAMP_CPA_EXECUTABLE" ||
+						name == "CPAMP_CPA_ARTIFACT_MANIFEST" {
 						t.Errorf("typed Start passed private environment variable %s to CPA", name)
 					}
 				}

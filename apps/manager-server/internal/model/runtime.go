@@ -91,9 +91,48 @@ func (s RuntimeState) IsValid() bool {
 	}
 }
 
-// CPAObservedVersion is an optional observed fact. Readiness alone does not
-// imply a safe version source or an expected-version operation precondition.
+// CPAObservedVersion is optional display metadata, never update authority.
+// Embedded populates it only as a projection of ActiveGatewayArtifact.Version;
+// External may retain its authenticated adapter-specific version observation.
 type CPAObservedVersion string
+
+type RuntimeArtifactID string
+
+func (id RuntimeArtifactID) IsValid() bool {
+	value := string(id)
+	const prefix = "sha256:"
+	if len(value) != len(prefix)+64 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ActiveGatewayArtifact is the exact executable identity observed by the
+// Embedded Supervisor. Version is trusted display metadata only; ArtifactID is
+// the future update-fencing authority.
+type ActiveGatewayArtifact struct {
+	Engine     string
+	ArtifactID RuntimeArtifactID
+	Version    string
+}
+
+func (a ActiveGatewayArtifact) Validate() error {
+	if a.Engine != "cpa" {
+		return fmt.Errorf("unsupported active Gateway artifact engine %q", a.Engine)
+	}
+	if !a.ArtifactID.IsValid() {
+		return fmt.Errorf("invalid active Gateway artifact ID %q", a.ArtifactID)
+	}
+	if a.Version != strings.TrimSpace(a.Version) {
+		return errors.New("active Gateway artifact version must not contain surrounding whitespace")
+	}
+	return nil
+}
 
 // RuntimeRecoveryState observes the Embedded Supervisor's process-local
 // bounded recovery policy. It does not express Manager desired state.
@@ -149,13 +188,14 @@ func (c RuntimeCapabilities) Supports(capability RuntimeCapability) bool {
 // owned desired configuration, including RuntimeMode, intentionally lives
 // outside this model.
 type RuntimeObservedStatus struct {
-	Identity           RuntimeIdentity
-	Generation         RuntimeGeneration
-	ProtocolVersion    RuntimeProtocolVersion
-	State              RuntimeState
-	CPAObservedVersion CPAObservedVersion
-	Capabilities       RuntimeCapabilities
-	Recovery           *RuntimeRecoveryObservation
+	Identity              RuntimeIdentity
+	Generation            RuntimeGeneration
+	ProtocolVersion       RuntimeProtocolVersion
+	State                 RuntimeState
+	CPAObservedVersion    CPAObservedVersion
+	ActiveGatewayArtifact *ActiveGatewayArtifact
+	Capabilities          RuntimeCapabilities
+	Recovery              *RuntimeRecoveryObservation
 }
 
 type RuntimeOperationType string
@@ -272,6 +312,19 @@ func (s RuntimeObservedStatus) Validate() error {
 	}
 	if !s.State.IsValid() {
 		return fmt.Errorf("invalid runtime state %q", s.State)
+	}
+	if s.ActiveGatewayArtifact != nil {
+		if !hasProtocol {
+			return errors.New("active Gateway artifact observation requires Runtime Protocol")
+		}
+		if err := s.ActiveGatewayArtifact.Validate(); err != nil {
+			return err
+		}
+		if string(s.CPAObservedVersion) != s.ActiveGatewayArtifact.Version {
+			return errors.New("CPA observed version must project trusted active Gateway artifact version")
+		}
+	} else if hasProtocol && s.CPAObservedVersion != "" {
+		return errors.New("Embedded CPA observed version requires trusted active Gateway artifact observation")
 	}
 	for _, capability := range s.Capabilities {
 		if strings.TrimSpace(string(capability)) == "" {

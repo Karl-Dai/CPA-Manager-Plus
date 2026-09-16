@@ -26,13 +26,14 @@ const (
 )
 
 type config struct {
-	addr              string
-	runtimeIdentity   string
-	runtimeGeneration uint64
-	token             string
-	journalPath       string
-	cpaExecutable     string
-	cpaAddr           string
+	addr                string
+	runtimeIdentity     string
+	runtimeGeneration   uint64
+	token               string
+	journalPath         string
+	cpaExecutable       string
+	cpaArtifactManifest string
+	cpaAddr             string
 }
 
 type generationSource func() (uint64, error)
@@ -67,7 +68,8 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 	}
 	journalPath := strings.TrimSpace(getenv("CPAMP_RUNTIME_JOURNAL_PATH"))
 	executable := strings.TrimSpace(getenv("CPAMP_CPA_EXECUTABLE"))
-	if err := validateLifecycleConfig(journalPath, executable); err != nil {
+	artifactManifest := strings.TrimSpace(getenv("CPAMP_CPA_ARTIFACT_MANIFEST"))
+	if err := validateLifecycleConfig(journalPath, executable, artifactManifest); err != nil {
 		return config{}, err
 	}
 	cpaAddr := strings.TrimSpace(getenv("CPAMP_RUNTIME_CPA_ADDR"))
@@ -86,13 +88,14 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 		}
 	}
 	return config{
-		addr:              addr,
-		runtimeIdentity:   identity,
-		runtimeGeneration: generation,
-		token:             token,
-		journalPath:       journalPath,
-		cpaExecutable:     executable,
-		cpaAddr:           cpaAddr,
+		addr:                addr,
+		runtimeIdentity:     identity,
+		runtimeGeneration:   generation,
+		token:               token,
+		journalPath:         journalPath,
+		cpaExecutable:       executable,
+		cpaArtifactManifest: artifactManifest,
+		cpaAddr:             cpaAddr,
 	}, nil
 }
 

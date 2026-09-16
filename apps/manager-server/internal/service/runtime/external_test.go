@@ -34,6 +34,9 @@ func TestExternalClientStatus(t *testing.T) {
 	if status.ProtocolVersion != "" || status.Identity != "" || status.Generation != 0 {
 		t.Fatalf("Status() invented Runtime Protocol metadata: %#v", status)
 	}
+	if status.ActiveGatewayArtifact != nil {
+		t.Fatalf("Status() invented active Gateway artifact identity: %#v", status.ActiveGatewayArtifact)
+	}
 	if status.Capabilities != nil {
 		t.Fatalf("Status() capabilities = %#v, want nil", status.Capabilities)
 	}

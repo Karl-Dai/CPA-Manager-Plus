@@ -2,12 +2,14 @@ package protocol
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"sync/atomic"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
@@ -81,6 +83,11 @@ func TestStatusReportsRecoveryWithoutChangingAvailabilityOrCapabilities(t *testi
 }
 
 func TestStatusStatesPreserveRuntimeMetadataAndOptionalVersion(t *testing.T) {
+	activeArtifact := artifact.Observation{
+		Engine:     artifact.EngineCPA,
+		ArtifactID: artifact.ID("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Version:    "7.3.3",
+	}
 	for _, state := range []readiness.State{readiness.Unknown, readiness.Offline, readiness.Starting, readiness.Ready} {
 		t.Run(string(state), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -93,12 +100,17 @@ func TestStatusStatesPreserveRuntimeMetadataAndOptionalVersion(t *testing.T) {
 					}
 					return state
 				}),
+				Artifact: artifactStatusObserverFunc(func() *artifact.Observation {
+					observed := activeArtifact
+					return &observed
+				}),
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			req := httptest.NewRequest(http.MethodGet, statusPath, nil).WithContext(ctx)
 			req.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+			req.Header.Set(ArtifactObservationHeader, ArtifactObservationFeature)
 			response := httptest.NewRecorder()
 			h.ServeHTTP(response, req)
 			if response.Code != http.StatusOK {
@@ -107,10 +119,70 @@ func TestStatusStatesPreserveRuntimeMetadataAndOptionalVersion(t *testing.T) {
 			var got statusResponse
 			decodeResponse(t, response, &got)
 			if got.ProtocolVersion != "v1" || got.RuntimeIdentity != "runtime-01" || got.RuntimeGeneration != 7 ||
-				got.State != string(state) || got.CPAObservedVersion != "" || len(got.Capabilities) != 0 {
+				got.State != string(state) || got.CPAObservedVersion != "7.3.3" ||
+				got.ActiveGatewayArtifact == nil || *got.ActiveGatewayArtifact != activeArtifact || len(got.Capabilities) != 0 {
 				t.Fatalf("status changed authority or invented facts: %+v", got)
 			}
 		})
+	}
+}
+
+func TestStatusArtifactObservationIsOptInAndRuntime14Compatible(t *testing.T) {
+	activeArtifact := artifact.Observation{
+		Engine:     artifact.EngineCPA,
+		ArtifactID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Version:    "7.3.3",
+	}
+	var observations int
+	h, err := NewHandler(Config{
+		RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, Token: testRuntimeToken,
+		Artifact: artifactStatusObserverFunc(func() *artifact.Observation {
+			observations++
+			observed := activeArtifact
+			return &observed
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacyRequest := httptest.NewRequest(http.MethodGet, statusPath, nil)
+	legacyRequest.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+	legacyResponse := httptest.NewRecorder()
+	h.ServeHTTP(legacyResponse, legacyRequest)
+	// This is the exact strict status shape consumed by the Runtime14 Manager
+	// at v2@132f47ae. It intentionally has no activeGatewayArtifact field.
+	type runtime14StatusResponse struct {
+		ProtocolVersion    string            `json:"protocolVersion"`
+		RuntimeIdentity    string            `json:"runtimeIdentity"`
+		RuntimeGeneration  uint64            `json:"runtimeGeneration"`
+		State              string            `json:"state"`
+		CPAObservedVersion string            `json:"cpaObservedVersion"`
+		Capabilities       []string          `json:"capabilities"`
+		Recovery           *recoveryResponse `json:"recovery"`
+	}
+	var legacy runtime14StatusResponse
+	decoder := json.NewDecoder(legacyResponse.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&legacy); err != nil {
+		t.Fatalf("Runtime14 strict Manager decode failed: %v", err)
+	}
+	if legacyResponse.Code != http.StatusOK || legacy.ProtocolVersion != Version ||
+		legacy.RuntimeIdentity != "runtime-01" || legacy.RuntimeGeneration != 7 ||
+		legacy.CPAObservedVersion != "" || observations != 0 {
+		t.Fatalf("legacy v1 status = %d, %+v, artifact reads %d", legacyResponse.Code, legacy, observations)
+	}
+
+	enhancedRequest := httptest.NewRequest(http.MethodGet, statusPath, nil)
+	enhancedRequest.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+	enhancedRequest.Header.Set(ArtifactObservationHeader, "future-feature, "+ArtifactObservationFeature)
+	enhancedResponse := httptest.NewRecorder()
+	h.ServeHTTP(enhancedResponse, enhancedRequest)
+	var enhanced statusResponse
+	decodeResponse(t, enhancedResponse, &enhanced)
+	if enhancedResponse.Code != http.StatusOK || enhanced.CPAObservedVersion != "7.3.3" ||
+		enhanced.ActiveGatewayArtifact == nil || *enhanced.ActiveGatewayArtifact != activeArtifact || observations != 1 {
+		t.Fatalf("opted-in v1 status = %d, %+v, artifact reads %d", enhancedResponse.Code, enhanced, observations)
 	}
 }
 
@@ -162,6 +234,28 @@ func TestStatusCallerCannotOverrideProbeOrForwardCredentials(t *testing.T) {
 	}
 }
 
+func TestStatusFailsClosedForInvalidArtifactObservation(t *testing.T) {
+	h, err := NewHandler(Config{
+		RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, Token: testRuntimeToken,
+		Artifact: artifactStatusObserverFunc(func() *artifact.Observation {
+			return &artifact.Observation{Engine: artifact.EngineCPA, ArtifactID: "sha256:UPPERCASE", Version: "7.3.3"}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, statusPath, nil)
+	req.Header.Set("Authorization", "Bearer "+testRuntimeToken)
+	req.Header.Set(ArtifactObservationHeader, ArtifactObservationFeature)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, req)
+	var got statusResponse
+	decodeResponse(t, response, &got)
+	if got.ActiveGatewayArtifact != nil || got.CPAObservedVersion != "" {
+		t.Fatalf("status exposed invalid artifact observation: %+v", got)
+	}
+}
+
 type statusObserverFunc func(context.Context) readiness.State
 
 func (f statusObserverFunc) Observe(ctx context.Context) readiness.State { return f(ctx) }
@@ -169,6 +263,10 @@ func (f statusObserverFunc) Observe(ctx context.Context) readiness.State { retur
 type recoveryStatusObserverFunc func() lifecycle.RecoveryStatus
 
 func (f recoveryStatusObserverFunc) RecoveryStatus() lifecycle.RecoveryStatus { return f() }
+
+type artifactStatusObserverFunc func() *artifact.Observation
+
+func (f artifactStatusObserverFunc) Observation() *artifact.Observation { return f() }
 
 type statusProcess struct{}
 
