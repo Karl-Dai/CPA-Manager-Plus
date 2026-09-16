@@ -140,6 +140,14 @@ func writeMutationError(w http.ResponseWriter, err error, operationName string) 
 		code, message, status = "operation_id_conflict", "operation ID names a different request", http.StatusConflict
 	case errors.Is(err, journal.ErrOperationStateConflict):
 		code, message, status = "operation_state_conflict", "CPA process ownership does not permit "+operationName, http.StatusConflict
+	case errors.Is(err, lifecycle.ErrActiveArtifactUnavailable):
+		code, message, status = "active_artifact_unavailable", "active artifact identity is unavailable", http.StatusConflict
+	case errors.Is(err, lifecycle.ErrActiveArtifactMismatch):
+		code, message, status = "active_artifact_mismatch", "active artifact identity does not match", http.StatusConflict
+	case errors.Is(err, lifecycle.ErrUnsupportedStaging):
+		code, message, status = "unsupported_staging_platform", "update staging is unsupported", http.StatusBadRequest
+	case errors.Is(err, lifecycle.ErrReleaseMetadataInvalid):
+		code, message, status = "release_metadata_invalid", "official release metadata is unavailable or invalid", http.StatusBadGateway
 	}
 	writeError(w, status, code, message)
 }

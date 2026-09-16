@@ -77,6 +77,8 @@ type Executor struct {
 	journal    operationJournal
 	process    process
 	executable string
+	artifact   activeArtifactRefresher
+	updates    updatePreparer
 	closed     atomic.Bool
 	closeOnce  sync.Once
 	closeErr   error

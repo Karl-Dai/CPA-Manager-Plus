@@ -31,6 +31,7 @@ type Config struct {
 	Start             StartExecutor
 	Stop              StopExecutor
 	Restart           RestartExecutor
+	PrepareUpdate     PrepareUpdateExecutor
 	Status            StatusObserver
 	Recovery          RecoveryStatusObserver
 	Artifact          ArtifactStatusObserver
@@ -59,6 +60,7 @@ type handler struct {
 	start             StartExecutor
 	stop              StopExecutor
 	restart           RestartExecutor
+	prepareUpdate     PrepareUpdateExecutor
 	status            StatusObserver
 	recovery          RecoveryStatusObserver
 	artifact          ArtifactStatusObserver
@@ -117,6 +119,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		start:             config.Start,
 		stop:              config.Stop,
 		restart:           config.Restart,
+		prepareUpdate:     config.PrepareUpdate,
 		status:            config.Status,
 		recovery:          config.Recovery,
 		artifact:          config.Artifact,
@@ -127,7 +130,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	method := http.MethodGet
 	switch r.URL.Path {
 	case handshakePath, statusPath:
-	case startPath, stopPath, restartPath:
+	case startPath, stopPath, restartPath, prepareUpdatePath:
 		method = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "runtime endpoint not found")
@@ -190,6 +193,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.submitStop(w, r)
 	case restartPath:
 		h.submitRestart(w, r)
+	case prepareUpdatePath:
+		h.submitPrepareUpdate(w, r)
 	}
 }
 
@@ -205,7 +210,7 @@ func requestsFeature(r *http.Request, feature string) bool {
 }
 
 func (h *handler) capabilities() []string {
-	capabilities := make([]string, 0, 3)
+	capabilities := make([]string, 0, 4)
 	if h.start != nil {
 		capabilities = append(capabilities, CapabilityStart)
 	}
@@ -214,6 +219,9 @@ func (h *handler) capabilities() []string {
 	}
 	if h.restart != nil {
 		capabilities = append(capabilities, CapabilityRestart)
+	}
+	if h.prepareUpdate != nil {
+		capabilities = append(capabilities, CapabilityPrepareUpdate)
 	}
 	return capabilities
 }

@@ -51,4 +51,8 @@ func (c *ExternalClient) Restart(context.Context, model.RuntimeMutationRequest) 
 	return model.RuntimeOperationResult{}, fmt.Errorf("restart external Runtime: %w", ErrRuntimeMutationUnsupported)
 }
 
+func (c *ExternalClient) PrepareUpdate(context.Context, model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+	return model.RuntimeOperationResult{}, fmt.Errorf("prepare-update external Runtime: %w", ErrRuntimeMutationUnsupported)
+}
+
 var _ RuntimeClient = (*ExternalClient)(nil)

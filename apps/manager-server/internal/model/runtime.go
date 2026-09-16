@@ -165,9 +165,10 @@ type RuntimeRecoveryObservation struct {
 type RuntimeCapability string
 
 const (
-	RuntimeCapabilityStart   RuntimeCapability = "start"
-	RuntimeCapabilityStop    RuntimeCapability = "stop"
-	RuntimeCapabilityRestart RuntimeCapability = "restart"
+	RuntimeCapabilityStart         RuntimeCapability = "start"
+	RuntimeCapabilityStop          RuntimeCapability = "stop"
+	RuntimeCapabilityRestart       RuntimeCapability = "restart"
+	RuntimeCapabilityPrepareUpdate RuntimeCapability = "prepare_update"
 )
 
 type RuntimeCapabilities []RuntimeCapability
@@ -201,14 +202,15 @@ type RuntimeObservedStatus struct {
 type RuntimeOperationType string
 
 const (
-	RuntimeOperationStart   RuntimeOperationType = "start"
-	RuntimeOperationStop    RuntimeOperationType = "stop"
-	RuntimeOperationRestart RuntimeOperationType = "restart"
+	RuntimeOperationStart         RuntimeOperationType = "start"
+	RuntimeOperationStop          RuntimeOperationType = "stop"
+	RuntimeOperationRestart       RuntimeOperationType = "restart"
+	RuntimeOperationPrepareUpdate RuntimeOperationType = "prepare_update"
 )
 
 func (t RuntimeOperationType) IsValid() bool {
 	switch t {
-	case RuntimeOperationStart, RuntimeOperationStop, RuntimeOperationRestart:
+	case RuntimeOperationStart, RuntimeOperationStop, RuntimeOperationRestart, RuntimeOperationPrepareUpdate:
 		return true
 	default:
 		return false
@@ -259,6 +261,89 @@ func (r RuntimeMutationRequest) Validate() error {
 		return errors.New("expected runtime generation must be positive")
 	}
 	return nil
+}
+
+type RuntimePrepareUpdateRequest struct {
+	RuntimeMutationRequest
+	ExpectedActiveArtifactID RuntimeArtifactID
+	TargetVersion            string
+}
+
+func (r RuntimePrepareUpdateRequest) Validate() error {
+	if err := r.RuntimeMutationRequest.Validate(); err != nil {
+		return err
+	}
+	if !r.ExpectedActiveArtifactID.IsValid() {
+		return errors.New("expected active artifact ID must be canonical SHA-256")
+	}
+	if !validRuntimeTargetVersion(r.TargetVersion) {
+		return errors.New("target version must be an exact canonical release version")
+	}
+	return nil
+}
+
+func validRuntimeTargetVersion(version string) bool {
+	if version == "" || version != strings.TrimSpace(version) || len(version) > 96 ||
+		strings.ContainsAny(version, "/\\:\x00") {
+		return false
+	}
+	coreAndPrerelease, build, ok := splitRuntimeVersion(version, "+")
+	if !ok || (build != "" && !validRuntimeVersionIdentifiers(build, false)) {
+		return false
+	}
+	core, prerelease, ok := splitRuntimeVersion(coreAndPrerelease, "-")
+	if !ok || (prerelease != "" && !validRuntimeVersionIdentifiers(prerelease, true)) {
+		return false
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return false
+		}
+		for _, character := range part {
+			if character < '0' || character > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func splitRuntimeVersion(value, separator string) (string, string, bool) {
+	if strings.Count(value, separator) > 1 {
+		return "", "", false
+	}
+	left, right, found := strings.Cut(value, separator)
+	if found && (left == "" || right == "") {
+		return "", "", false
+	}
+	return left, right, true
+}
+
+func validRuntimeVersionIdentifiers(value string, rejectLeadingZeroNumeric bool) bool {
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		numeric := true
+		for _, character := range identifier {
+			if character < '0' || character > '9' {
+				numeric = false
+			}
+			if (character < '0' || character > '9') &&
+				(character < 'A' || character > 'Z') &&
+				(character < 'a' || character > 'z') && character != '-' {
+				return false
+			}
+		}
+		if rejectLeadingZeroNumeric && numeric && len(identifier) > 1 && identifier[0] == '0' {
+			return false
+		}
+	}
+	return true
 }
 
 type RuntimeOperationFailure struct {

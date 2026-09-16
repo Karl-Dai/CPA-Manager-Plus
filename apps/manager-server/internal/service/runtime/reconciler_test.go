@@ -292,6 +292,10 @@ func (c *recordingRuntimeClient) Restart(_ context.Context, request model.Runtim
 	return runtimeOperationResult(request, model.RuntimeOperationRestart, model.RuntimeOperationSucceeded), nil
 }
 
+func (c *recordingRuntimeClient) PrepareUpdate(_ context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+	return runtimeOperationResult(request.RuntimeMutationRequest, model.RuntimeOperationPrepareUpdate, model.RuntimeOperationSucceeded), nil
+}
+
 func (c *recordingRuntimeClient) setStatus(status model.RuntimeObservedStatus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -1,0 +1,374 @@
+package update
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
+)
+
+const (
+	stagedArtifactSchemaVersion = 1
+	stagedExecutableName        = "cli-proxy-api"
+	stagedMetadataName          = "artifact.json"
+	maxStagedMetadataBytes      = 16 << 10
+	maxExtractedBinaryBytes     = 256 << 20
+	maxExpandedArchiveBytes     = 512 << 20
+	temporaryPrefix             = ".tmp-"
+)
+
+var (
+	ErrStaging       = errors.New("artifact staging failed")
+	ErrStageConflict = errors.New("finalized staged artifact conflicts with official source or exact bytes")
+)
+
+// Metadata is CPAMP-owned authority for one finalized inactive CPA artifact.
+type Metadata struct {
+	SchemaVersion       int         `json:"schemaVersion"`
+	Engine              string      `json:"engine"`
+	Version             string      `json:"version"`
+	ArtifactID          artifact.ID `json:"artifactId"`
+	SourceArchiveDigest string      `json:"sourceArchiveDigest"`
+}
+
+func (m Metadata) validate() error {
+	if m.SchemaVersion != stagedArtifactSchemaVersion || m.Engine != artifact.EngineCPA ||
+		ValidateVersion(m.Version) != nil || !m.ArtifactID.IsValid() || !canonicalDigest(m.SourceArchiveDigest) {
+		return errors.New("staged artifact metadata is noncanonical")
+	}
+	return nil
+}
+
+// Preparer combines the fixed official source with Supervisor-private storage.
+type Preparer struct {
+	source *Source
+	store  *Store
+}
+
+func NewPreparer(root string) (*Preparer, error) {
+	source, err := NewSource()
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewStore(root)
+	if err != nil {
+		return nil, err
+	}
+	return &Preparer{source: source, store: store}, nil
+}
+
+func newPreparer(source *Source, store *Store) *Preparer {
+	return &Preparer{source: source, store: store}
+}
+
+func (p *Preparer) Resolve(ctx context.Context, version string) (Release, error) {
+	if p == nil || p.source == nil {
+		return Release{}, fmt.Errorf("%w: release source is unavailable", ErrReleaseMetadata)
+	}
+	return p.source.Resolve(ctx, version)
+}
+
+func (p *Preparer) Stage(ctx context.Context, release Release) (Metadata, error) {
+	if p == nil || p.source == nil || p.store == nil {
+		return Metadata{}, fmt.Errorf("%w: staging service is unavailable", ErrStaging)
+	}
+	return p.store.Stage(ctx, release, p.source.Download)
+}
+
+// Store owns immutable finalized stages beneath one private persistent root.
+type Store struct {
+	root string
+}
+
+func NewStore(root string) (*Store, error) {
+	if strings.TrimSpace(root) == "" || strings.ContainsRune(root, '\x00') {
+		return nil, fmt.Errorf("%w: staging root is required", ErrStaging)
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve staging root: %v", ErrStaging, err)
+	}
+	if err := os.MkdirAll(absolute, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: create staging root: %v", ErrStaging, err)
+	}
+	if err := os.Chmod(absolute, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: restrict staging root: %v", ErrStaging, err)
+	}
+	store := &Store{root: absolute}
+	if err := store.cleanupTemporary(); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+type downloadArchive func(context.Context, Release, io.Writer) error
+
+func (s *Store) Stage(ctx context.Context, release Release, download downloadArchive) (Metadata, error) {
+	if err := ctx.Err(); err != nil {
+		return Metadata{}, err
+	}
+	if download == nil || ValidateVersion(release.Version) != nil || !canonicalDigest(release.ArchiveDigest) {
+		return Metadata{}, fmt.Errorf("%w: invalid stage request", ErrStaging)
+	}
+	finalPath := filepath.Join(s.root, release.Version)
+	if metadata, found, err := s.verifyFinal(finalPath, release); found || err != nil {
+		return metadata, err
+	}
+	temporary, err := os.MkdirTemp(s.root, temporaryPrefix)
+	if err != nil {
+		return Metadata{}, fmt.Errorf("%w: create operation temporary directory: %v", ErrStaging, err)
+	}
+	defer os.RemoveAll(temporary)
+	if err := os.Chmod(temporary, 0o700); err != nil {
+		return Metadata{}, fmt.Errorf("%w: restrict operation temporary directory: %v", ErrStaging, err)
+	}
+
+	archivePath := filepath.Join(temporary, "source.tar.gz")
+	archiveFile, err := os.OpenFile(archivePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return Metadata{}, fmt.Errorf("%w: create temporary archive: %v", ErrStaging, err)
+	}
+	downloadErr := download(ctx, release, archiveFile)
+	syncErr := archiveFile.Sync()
+	closeErr := archiveFile.Close()
+	if err := errors.Join(downloadErr, syncErr, closeErr); err != nil {
+		return Metadata{}, err
+	}
+
+	publication := filepath.Join(temporary, "final")
+	if err := os.Mkdir(publication, 0o700); err != nil {
+		return Metadata{}, fmt.Errorf("%w: create publication directory: %v", ErrStaging, err)
+	}
+	artifactID, err := extractExecutable(archivePath, filepath.Join(publication, stagedExecutableName))
+	if err != nil {
+		return Metadata{}, err
+	}
+	metadata := Metadata{
+		SchemaVersion:       stagedArtifactSchemaVersion,
+		Engine:              artifact.EngineCPA,
+		Version:             release.Version,
+		ArtifactID:          artifactID,
+		SourceArchiveDigest: release.ArchiveDigest,
+	}
+	if err := writeMetadata(filepath.Join(publication, stagedMetadataName), metadata); err != nil {
+		return Metadata{}, err
+	}
+	if err := syncDirectory(publication); err != nil {
+		return Metadata{}, fmt.Errorf("%w: sync publication directory: %v", ErrStaging, err)
+	}
+	if _, found, err := s.verifyFinal(finalPath, release); found || err != nil {
+		return Metadata{}, err
+	}
+	if err := os.Rename(publication, finalPath); err != nil {
+		if existing, found, verifyErr := s.verifyFinal(finalPath, release); found || verifyErr != nil {
+			return existing, verifyErr
+		}
+		return Metadata{}, fmt.Errorf("%w: atomically publish finalized stage: %v", ErrStaging, err)
+	}
+	if err := syncDirectory(s.root); err != nil {
+		return Metadata{}, fmt.Errorf("%w: sync staging root: %v", ErrStaging, err)
+	}
+	verified, found, err := s.verifyFinal(finalPath, release)
+	if err != nil || !found {
+		if err == nil {
+			err = fmt.Errorf("%w: finalized stage disappeared", ErrStaging)
+		}
+		return Metadata{}, err
+	}
+	return verified, nil
+}
+
+func (s *Store) cleanupTemporary() error {
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return fmt.Errorf("%w: inspect staging root: %v", ErrStaging, err)
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), temporaryPrefix) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.root, entry.Name())); err != nil {
+			return fmt.Errorf("%w: clean incomplete temporary stage: %v", ErrStaging, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) verifyFinal(finalPath string, release Release) (Metadata, bool, error) {
+	info, err := os.Lstat(finalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return Metadata{}, false, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return Metadata{}, true, fmt.Errorf("%w: finalized stage is not a directory", ErrStageConflict)
+	}
+	metadata, err := readMetadata(filepath.Join(finalPath, stagedMetadataName))
+	if err != nil || metadata.Version != release.Version || metadata.SourceArchiveDigest != release.ArchiveDigest {
+		return Metadata{}, true, fmt.Errorf("%w: finalized metadata differs", ErrStageConflict)
+	}
+	executablePath := filepath.Join(finalPath, stagedExecutableName)
+	executableInfo, err := os.Lstat(executablePath)
+	if err != nil || !executableInfo.Mode().IsRegular() || executableInfo.Mode().Perm() != 0o755 {
+		return Metadata{}, true, fmt.Errorf("%w: finalized executable type or permissions differ", ErrStageConflict)
+	}
+	actual, err := digestFile(executablePath, maxExtractedBinaryBytes)
+	if err != nil || actual != metadata.ArtifactID {
+		return Metadata{}, true, fmt.Errorf("%w: finalized executable digest differs", ErrStageConflict)
+	}
+	metadataInfo, err := os.Lstat(filepath.Join(finalPath, stagedMetadataName))
+	if err != nil || !metadataInfo.Mode().IsRegular() || metadataInfo.Mode().Perm() != 0o444 {
+		return Metadata{}, true, fmt.Errorf("%w: finalized metadata permissions differ", ErrStageConflict)
+	}
+	return metadata, true, nil
+}
+
+func extractExecutable(archivePath, executablePath string) (artifact.ID, error) {
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("%w: open verified archive: %v", ErrStaging, err)
+	}
+	defer archiveFile.Close()
+	gzipReader, err := gzip.NewReader(archiveFile)
+	if err != nil {
+		return "", fmt.Errorf("%w: open gzip archive: %v", ErrStaging, err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	found := false
+	var expandedBytes int64
+	var executableDigest artifact.ID
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("%w: inspect tar archive: %v", ErrStaging, err)
+		}
+		if err := validateArchivePath(header.Name); err != nil {
+			return "", err
+		}
+		if header.Size < 0 || header.Size > maxExpandedArchiveBytes-expandedBytes {
+			return "", fmt.Errorf("%w: archive expanded size exceeds limit", ErrStaging)
+		}
+		expandedBytes += header.Size
+		if header.Name != stagedExecutableName {
+			continue
+		}
+		if found {
+			return "", fmt.Errorf("%w: duplicate %s archive entry", ErrStaging, stagedExecutableName)
+		}
+		found = true
+		if (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA) || header.Size <= 0 || header.Size > maxExtractedBinaryBytes {
+			return "", fmt.Errorf("%w: staged executable entry type or size is invalid", ErrStaging)
+		}
+		file, err := os.OpenFile(executablePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return "", fmt.Errorf("%w: create staged executable: %v", ErrStaging, err)
+		}
+		hasher := sha256.New()
+		written, copyErr := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(tarReader, maxExtractedBinaryBytes+1))
+		chmodErr := file.Chmod(0o755)
+		syncErr := file.Sync()
+		closeErr := file.Close()
+		if err := errors.Join(copyErr, chmodErr, syncErr, closeErr); err != nil || written != header.Size || written > maxExtractedBinaryBytes {
+			return "", fmt.Errorf("%w: extract staged executable", ErrStaging)
+		}
+		executableDigest = artifact.ID("sha256:" + hex.EncodeToString(hasher.Sum(nil)))
+	}
+	if !found {
+		return "", fmt.Errorf("%w: archive does not contain %s", ErrStaging, stagedExecutableName)
+	}
+	return executableDigest, nil
+}
+
+func validateArchivePath(name string) error {
+	if name == "" || strings.ContainsAny(name, "\\\x00") || path.IsAbs(name) {
+		return fmt.Errorf("%w: unsafe archive path", ErrStaging)
+	}
+	cleaned := path.Clean(name)
+	canonical := strings.TrimSuffix(name, "/")
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || cleaned != canonical {
+		return fmt.Errorf("%w: unsafe archive path", ErrStaging)
+	}
+	return nil
+}
+
+func writeMetadata(name string, metadata Metadata) error {
+	if err := metadata.validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrStaging, err)
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("%w: encode staged metadata: %v", ErrStaging, err)
+	}
+	encoded = append(encoded, '\n')
+	file, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("%w: create staged metadata: %v", ErrStaging, err)
+	}
+	_, writeErr := file.Write(encoded)
+	chmodErr := file.Chmod(0o444)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, chmodErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("%w: persist staged metadata: %v", ErrStaging, err)
+	}
+	return nil
+}
+
+func readMetadata(name string) (Metadata, error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return Metadata{}, errors.New("read bounded staged metadata")
+	}
+	encoded, readErr := io.ReadAll(io.LimitReader(file, maxStagedMetadataBytes+1))
+	if err := errors.Join(readErr, file.Close()); err != nil || len(encoded) > maxStagedMetadataBytes {
+		return Metadata{}, errors.New("read bounded staged metadata")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var metadata Metadata
+	if err := decoder.Decode(&metadata); err != nil {
+		return Metadata{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Metadata{}, errors.New("staged metadata must contain one JSON value")
+	}
+	return metadata, metadata.validate()
+}
+
+func digestFile(name string, limit int64) (artifact.ID, error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	written, err := io.Copy(hasher, io.LimitReader(file, limit+1))
+	if err != nil || written > limit {
+		return "", errors.New("file exceeds digest limit")
+	}
+	return artifact.ID("sha256:" + hex.EncodeToString(hasher.Sum(nil))), nil
+}
+
+func syncDirectory(name string) error {
+	directory, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
+}

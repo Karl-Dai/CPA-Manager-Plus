@@ -18,9 +18,18 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
 const startHelperName = "cpamp-start-test-child.exe"
+
+func expectedRuntimeCapabilities() []string {
+	capabilities := []string{"start", "stop", "restart"}
+	if runtimeupdate.SupportedPlatform(runtime.GOOS, runtime.GOARCH) {
+		capabilities = append(capabilities, "prepare_update")
+	}
+	return capabilities
+}
 
 func TestActiveArtifactObservationIsCachedAndOrthogonalToRuntimeGeneration(t *testing.T) {
 	directory := t.TempDir()
@@ -380,7 +389,7 @@ func TestRuntimeStartEndToEnd(t *testing.T) {
 		t.Helper()
 		for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 			got := requestRuntime(t, h, path)
-			if got.RuntimeGeneration != generation || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
+			if got.RuntimeGeneration != generation || !reflect.DeepEqual(got.Capabilities, expectedRuntimeCapabilities()) ||
 				got.CPAObservedVersion != "" {
 				t.Fatalf("Start changed authority or invented version: %+v", got)
 			}
@@ -508,7 +517,7 @@ func TestConfiguredRuntimeStatusStartsWithInactiveRecoveryLease(t *testing.T) {
 
 	status := requestRuntime(t, handler, "/v1/runtime/status")
 	if status.State != "offline" || status.Recovery == nil || status.Recovery.State != "inactive" ||
-		status.Recovery.AttemptsRemaining != 0 || !reflect.DeepEqual(status.Capabilities, []string{"start", "stop", "restart"}) {
+		status.Recovery.AttemptsRemaining != 0 || !reflect.DeepEqual(status.Capabilities, expectedRuntimeCapabilities()) {
 		t.Fatalf("startup status = %+v", status)
 	}
 	handshake := requestRuntime(t, handler, "/v1/runtime/handshake")
@@ -567,7 +576,7 @@ func TestRuntimeAutomaticallyRecoversConfirmedUnexpectedExit(t *testing.T) {
 		status := requestRuntime(t, handler, "/v1/runtime/status")
 		if status.Recovery != nil && status.Recovery.State == "armed" && status.Recovery.AttemptsRemaining == 2 {
 			if status.State != "starting" || status.RuntimeGeneration != 41 ||
-				!reflect.DeepEqual(status.Capabilities, []string{"start", "stop", "restart"}) {
+				!reflect.DeepEqual(status.Capabilities, expectedRuntimeCapabilities()) {
 				t.Fatalf("recovered Runtime changed availability contract: %+v", status)
 			}
 			break
@@ -614,7 +623,7 @@ func TestRuntimeStopEndToEndKeepsReplayAwayFromReplacementChild(t *testing.T) {
 
 	for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 		got := requestRuntime(t, handler, path)
-		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
+		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, expectedRuntimeCapabilities()) ||
 			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "offline") {
 			t.Fatalf("configured lifecycle metadata = %+v", got)
 		}
@@ -744,7 +753,7 @@ func TestRuntimeRestartEndToEndReplacesOwnedChildExactlyOnce(t *testing.T) {
 	awaitSpawnCount(t, directory, 2)
 	for _, path := range []string{"/v1/runtime/handshake", "/v1/runtime/status"} {
 		got := requestRuntime(t, handler, path)
-		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) ||
+		if got.RuntimeGeneration != 41 || !reflect.DeepEqual(got.Capabilities, expectedRuntimeCapabilities()) ||
 			got.CPAObservedVersion != "" || (path == "/v1/runtime/status" && got.State != "starting") {
 			t.Fatalf("Restart changed authority or invented readiness: %+v", got)
 		}

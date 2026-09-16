@@ -299,7 +299,7 @@ incarnation change may rotate the generation while unchanged executable bytes
 retain the same artifact ID, and lifecycle restart/recovery from the same bytes
 does not change that ID.
 
-Every future updater mutation MUST carry an
+Every updater mutation MUST carry an
 `expectedActiveArtifactId` obtained from a fresh Runtime observation.
 Supervisor remains the final enforcing authority and MUST compare it with the
 freshly observed current artifact ID before durable update intent or any
@@ -405,6 +405,35 @@ Logical ownership, security/authority, state ownership, process role, and deploy
 - Supervisor self-replacement is not part of the first Runtime Foundation implementation. Supervisor is updated by the outer CPAMP package/container/install mechanism.
 - A build-time checksum-pinned embedded CPA artifact establishes image contents; it does not grant Runtime, Ingress, or container bootstrap updater authority.
 
+The first updater mutation is the private Runtime Protocol v1
+`prepare_update` operation. Manager supplies only an exact target version and
+the existing Runtime identity, generation, and active-artifact freshness
+fences. Supervisor fixes release authority to the exact
+`router-for-me/CLIProxyAPI` GitHub tag and supported official platform asset;
+Manager cannot supply a repository, URL, mirror, asset name, checksum,
+executable path, or extraction path. The selected GitHub Release asset MUST
+provide a canonical SHA-256 digest, which Supervisor verifies against the
+downloaded archive bytes. Supervisor separately computes the exact extracted
+`cli-proxy-api` executable SHA-256; archive identity and executable artifact
+identity are distinct authorities.
+
+Before release lookup, download, or durable intent for a previously unseen
+prepare operation, Supervisor freshly re-observes the configured active
+executable and enforces `expectedActiveArtifactId`. Verified output is
+atomically finalized as an immutable inactive stage under Supervisor-private
+persistent Runtime state, logically
+`/runtime/supervisor/artifacts/cpa/<exact-version>/`, with only the executable
+and CPAMP-owned metadata. Replayed retained operations perform no second
+download or extraction, and an existing version is reused only after its
+metadata and exact executable bytes still match the current official source
+digest.
+
+Prepare does not change the active executable, child process, desired
+lifecycle, recovery lease, or Runtime generation. Persistent active selection,
+activation, target readiness validation, process transition, and rollback are
+deferred together to Runtime17, which MUST revalidate staged bytes and enforce
+a fresh active-artifact fence again before its own side effects.
+
 ## Phase 1 implementation boundary
 
 Phase 1 MUST establish:
@@ -454,3 +483,4 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 11. Ingress owns no product configuration or lifecycle authority, persists no product state, and receives no Runtime, Manager, CPA Management, or provider credential.
 12. Container/bootstrap startup may create internal transport and seed state, but MUST NOT infer desired running state or start CPA outside a typed durable lifecycle mutation.
 13. Exact active executable SHA-256 is Embedded update-fencing authority; human version metadata is trusted only when CPAMP-owned metadata binds it to that exact digest, and future updater side effects require a Supervisor-enforced expected-active-artifact fence.
+14. Trusted CPA prepare/staging resolves only an exact official release in Supervisor, verifies both source archive and extracted executable identities, persists only an inactive immutable stage in Runtime-owned storage, and grants no activation or rollback authority.

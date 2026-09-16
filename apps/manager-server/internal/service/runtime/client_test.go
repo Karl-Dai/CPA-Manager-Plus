@@ -34,6 +34,11 @@ func (f *fakeRuntimeClient) Restart(ctx context.Context, _ model.RuntimeMutation
 	return f.operationResult, nil
 }
 
+func (f *fakeRuntimeClient) PrepareUpdate(ctx context.Context, _ model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+	f.ctx = ctx
+	return f.operationResult, nil
+}
+
 var _ RuntimeClient = (*fakeRuntimeClient)(nil)
 
 func TestRuntimeClientStatusContract(t *testing.T) {
@@ -59,7 +64,7 @@ func TestRuntimeClientStatusContract(t *testing.T) {
 	}
 
 	contract := reflect.TypeOf((*RuntimeClient)(nil)).Elem()
-	wantMethods := map[string]bool{"Restart": true, "Start": true, "Status": true, "Stop": true}
+	wantMethods := map[string]bool{"PrepareUpdate": true, "Restart": true, "Start": true, "Status": true, "Stop": true}
 	if contract.NumMethod() != len(wantMethods) {
 		t.Fatalf("RuntimeClient methods = %v, want %v", contract.NumMethod(), wantMethods)
 	}

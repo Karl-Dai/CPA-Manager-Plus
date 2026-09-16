@@ -17,6 +17,10 @@ const (
 	ProtocolErrorOperationIDConflict             ProtocolErrorCode = "operation_id_conflict"
 	ProtocolErrorOperationStateConflict          ProtocolErrorCode = "operation_state_conflict"
 	ProtocolErrorOperationPersistenceUnavailable ProtocolErrorCode = "operation_persistence_unavailable"
+	ProtocolErrorActiveArtifactUnavailable       ProtocolErrorCode = "active_artifact_unavailable"
+	ProtocolErrorActiveArtifactMismatch          ProtocolErrorCode = "active_artifact_mismatch"
+	ProtocolErrorUnsupportedStagingPlatform      ProtocolErrorCode = "unsupported_staging_platform"
+	ProtocolErrorReleaseMetadataInvalid          ProtocolErrorCode = "release_metadata_invalid"
 	ProtocolErrorInternal                        ProtocolErrorCode = "internal_error"
 )
 
