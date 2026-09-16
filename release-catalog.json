@@ -136,5 +136,51 @@
       }
     },
     "digest": "sha256:16d655326333d4934e31b4b3d46fb4da3c4526b25959b94f09e1e260e5497f8b"
+  },
+  "v1.12.14": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.12.14",
+        "stage": "stable",
+        "source_commit": "6d0e9bd5340eda3f73db3fc6e5f29056ff3cc4fe"
+      },
+      "content": {
+        "summary": {
+          "zh": "改进运行时模型价格发现、缺失价格提醒与高级价格规则编辑，并修复监控来源显示和移动端刷新布局，同时新增 Manager Server 版本查询。",
+          "en": "Improves runtime model price discovery, missing-price attention and advanced pricing-rule editing, fixes monitoring source display and mobile refresh layout, and adds Manager Server version reporting."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.12.14/docs/release-notes/v1.12.14-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.12.14/docs/release-notes/v1.12.14-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.12.14"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.12.14"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.12.14_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.12.14_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.12.14_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.12.14_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.12.14_windows_amd64.zip",
+            "cpa-manager-plus_v1.12.14_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": null
+      }
+    },
+    "digest": "sha256:ce68a1bea1467c4ba5bb2e29e1b3e673850cf7eb1974225ae21404f3ef8cbfbe"
   }
 }
