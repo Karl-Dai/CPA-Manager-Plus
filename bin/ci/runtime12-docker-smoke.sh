@@ -153,7 +153,29 @@ if [ "$config_before" != "$config_after" ]; then
   exit 1
 fi
 
-start_payload="$(runtime_operation_payload runtime12-smoke-start "$restarted_status")"
+"${compose[@]}" exec -T cpamp-runtime sh -ec '
+  printf "\n# runtime12-smoke-existing-config-marker\n" >> /runtime/gateway/config.yaml
+'
+modified_config_before_recreate="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
+"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+recreated_status="$(wait_runtime_state offline)"
+if [ "$(printf '%s' "$recreated_status" | json_field recovery.state)" != "inactive" ]; then
+  echo "Runtime recreate restored a recovery lease" >&2
+  exit 1
+fi
+secret_after_recreate="$("${compose[@]}" exec -T cpamp-manager sha256sum /run/cpamp/runtime-secret/token | awk '{print $1}')"
+config_after_recreate="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
+if [ "$secret_before" != "$secret_after_recreate" ]; then
+  echo "Runtime transport secret changed across recreate" >&2
+  exit 1
+fi
+if [ "$modified_config_before_recreate" != "$config_after_recreate" ]; then
+  echo "Existing Gateway configuration was overwritten across recreate" >&2
+  exit 1
+fi
+
+generation_before_start="$(printf '%s' "$recreated_status" | json_uint_field runtimeGeneration)"
+start_payload="$(runtime_operation_payload runtime12-smoke-start "$recreated_status")"
 start_result="$(runtime_post /v1/runtime/operations/start "$start_payload")"
 if [ "$(printf '%s' "$start_result" | json_field state)" != "succeeded" ]; then
   echo "Runtime Start did not succeed: ${start_result}" >&2
@@ -162,6 +184,11 @@ fi
 ready_status="$(wait_runtime_state ready 90)"
 if [ "$(printf '%s' "$ready_status" | json_field recovery.state)" != "armed" ]; then
   echo "successful explicit Start did not arm bounded recovery" >&2
+  exit 1
+fi
+generation_after_start="$(printf '%s' "$ready_status" | json_uint_field runtimeGeneration)"
+if [ "$generation_before_start" != "$generation_after_start" ]; then
+  echo "Runtime generation changed across typed Start" >&2
   exit 1
 fi
 "${compose[@]}" exec -T cpamp-runtime sh -ec '
@@ -190,9 +217,18 @@ if [ "$(printf '%s' "$stop_result" | json_field state)" != "succeeded" ]; then
   echo "Runtime Stop did not succeed: ${stop_result}" >&2
   exit 1
 fi
-wait_runtime_state offline >/dev/null
+stopped_status="$(wait_runtime_state offline)"
+if [ "$(printf '%s' "$stopped_status" | json_field recovery.state)" != "inactive" ]; then
+  echo "successful typed Stop did not disarm bounded recovery" >&2
+  exit 1
+fi
+generation_after_stop="$(printf '%s' "$stopped_status" | json_uint_field runtimeGeneration)"
+if [ "$generation_before_start" != "$generation_after_stop" ]; then
+  echo "Runtime generation changed across typed Start/Stop" >&2
+  exit 1
+fi
 
 "${compose[@]}" stop cpamp-runtime >/dev/null
 curl --fail --silent --show-error "${public_origin}/health" >/dev/null
 
-echo "Runtime 12 Docker smoke passed: Start -> ready -> Stop, single public ingress, and failure isolation"
+echo "Runtime 12 Docker smoke passed: restart/recreate persistence, stable Start/Stop generation, recovery disarm, single public ingress, and failure isolation"

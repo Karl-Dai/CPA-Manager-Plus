@@ -36,6 +36,15 @@ if ((ingress.volumes ?? []).length !== 0) fail('Ingress must not mount product d
 
 const volumeTargets = (service) =>
   new Map((service.volumes ?? []).map((volume) => [volume.target, volume]));
+const isDockerSocketPath = (value) =>
+  typeof value === 'string' && /(^|\/)docker\.sock$/.test(value.replaceAll('\\', '/'));
+const mountsDockerSocket = (service) =>
+  (service.volumes ?? []).some((volume) => {
+    if (typeof volume === 'string') {
+      return volume.split(':').some(isDockerSocketPath);
+    }
+    return isDockerSocketPath(volume.source) || isDockerSocketPath(volume.target);
+  });
 const managerVolumes = volumeTargets(manager);
 const runtimeVolumes = volumeTargets(runtime);
 if (!managerVolumes.has('/data') || managerVolumes.has('/runtime')) {
@@ -55,14 +64,19 @@ if (managerSecret.source !== runtimeSecret.source) {
   fail('Manager and Runtime must consume the same narrow transport-secret volume');
 }
 
+for (const [name, service] of Object.entries(services)) {
+  if (service.network_mode === 'host') fail(`${name} must not use host networking`);
+  if (service.privileged === true) fail(`${name} must not run privileged`);
+  if (mountsDockerSocket(service)) fail(`${name} must not mount a Docker socket`);
+}
+
 for (const [name, service] of [
   ['cpamp-manager', manager],
   ['cpamp-runtime', runtime],
 ]) {
   if ((service.ports ?? []).length !== 0) fail(`${name} must not publish host ports`);
-  if (service.network_mode === 'host') fail(`${name} must not use host networking`);
 }
 
 console.log(
-  'Runtime 12 Compose validation passed: one public 18317 mapping and isolated state ownership'
+  'Runtime 12 Compose validation passed: one public 18317 mapping, isolated state, and restricted container privileges'
 );
