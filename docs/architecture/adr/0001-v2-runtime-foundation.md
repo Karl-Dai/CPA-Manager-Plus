@@ -6,7 +6,7 @@
 
 ## Context
 
-CPAMP 2.0 separates product control, privileged runtime execution, and model traffic into distinct ownership domains. The goal is to let the gateway keep serving model traffic when the control plane is unavailable, while keeping privileged process and update operations out of the Manager process.
+CPAMP 2.0 separates public transport, product control, privileged runtime execution, and model traffic into distinct ownership domains. The goal is to let the gateway keep serving model traffic when the control plane is unavailable, while keeping privileged process and update operations out of the Manager process.
 
 This ADR freezes the minimum architecture needed to begin implementation. It intentionally does not freeze later Gateway Governance, Public API v2, migration UI, or provider-routing policy.
 
@@ -14,16 +14,17 @@ This ADR freezes the minimum architecture needed to begin implementation. It int
 
 ### 1. Product and runtime roles
 
-CPAMP uses three runtime roles:
+CPAMP uses three runtime authority roles plus one stateless public transport role:
 
+- **Ingress** — Public transport mux. Owns no product desired state, lifecycle authority, credential policy, or business storage.
 - **Manager** — Control Plane. Owns desired product/runtime configuration, user/admin state, usage/analytics, update recommendation policy, and encrypted product secrets.
 - **Runtime Supervisor** — Execution Plane for Embedded mode. Owns privileged lifecycle execution and its private operation journal. It does not own product configuration.
 - **CPA** — Data Plane. Owns gateway request handling, provider/credential runtime behavior, and model traffic.
 
-Model traffic MUST follow:
+The default Embedded product surface exposes one CPAMP endpoint on host port `18317`. Manager `18317`, CPA/Gateway `8317`, and Runtime Protocol `9081` remain internal listeners. Model traffic MUST follow:
 
 ```text
-AI Client -> CPA -> Provider
+AI Client -> CPAMP Ingress -> CPA/Gateway -> Provider
 ```
 
 Model traffic MUST NOT pass through Manager or Runtime Supervisor.
@@ -58,6 +59,7 @@ Ownership is fixed as follows:
 | Operation journal / rollback execution state | Supervisor private journal |
 | Usage / analytics | Manager |
 | CPA gateway/provider runtime | CPA |
+| Public request transport and route mux | Ingress, without persisted product state |
 
 Invariant:
 
@@ -208,6 +210,8 @@ For Embedded provisioning or mutation, Manager sends only the minimum execution 
 
 Secrets MUST NOT be written to the Supervisor operation journal, progress events, or logs.
 
+The Manager-to-Supervisor Runtime transport credential is internal CPAMP installation state, not an ordinary user setting and not the CPA Management Key. Embedded packaging MAY bootstrap a high-entropy credential into a narrow, dedicated secret source shared only with Manager and Supervisor. It MUST preserve an existing value across restart/recreate and MUST NOT share Manager databases, `data.key`, Supervisor journal, or Gateway state to distribute that credential. Ingress does not receive it.
+
 ### 7. Readiness and crash-loop fencing
 
 Lifecycle mutation success is separate from readiness: Start succeeds at spawn and ownership publication, Stop at confirmed exact-child reap, and Restart at old-child reap plus replacement spawn and ownership publication. These operations do not wait for readiness or write readiness into their journal evidence.
@@ -246,24 +250,28 @@ The logical architecture is identical across platforms. Platform differences are
 #### Docker Embedded — Phase 1 priority
 
 ```text
+cpamp-ingress container
+  -> public :18317 transport mux
+
 cpamp-manager container
-  -> Manager
+  -> Manager internal :18317
 
 cpamp-runtime container
-  -> Runtime Supervisor (PID 1)
-      -> CPA child process
+  -> Runtime Supervisor (PID 1, internal :9081)
+      -> CPA child process (internal :8317)
 ```
 
-Manager data and Runtime data use separate storage ownership. Runtime Supervisor does not require Docker socket access to manage CPA.
+Only Ingress publishes a host port by default. Manager data and Runtime data use separate storage ownership. Runtime state is internally divided between Supervisor journal state and Gateway work/config/auth/log/plugin state. Ingress mounts neither data set. Runtime Supervisor does not require Docker socket access to manage CPA.
 
-Docker Phase 1 has two deployment/container failure domains:
+Docker Phase 1 has three deployment/container failure domains:
 
-1. `cpamp-manager` container.
-2. `cpamp-runtime` container.
+1. `cpamp-ingress` edge container.
+2. `cpamp-manager` container.
+3. `cpamp-runtime` container.
 
 Within `cpamp-runtime`, Runtime Supervisor and CPA remain separate processes with distinct roles, ownership, state, and authority, but they share the Runtime container failure domain. Phase 1 does not guarantee that the CPA child survives Runtime Supervisor PID 1 exit or Runtime container crash, stop, or kill.
 
-Phase 1 does not introduce a third CPA container, Docker socket orchestration, or another sidecar/controller to manufacture an additional deployment failure domain.
+Phase 1 does not introduce a separate CPA container, Docker socket orchestration, or another lifecycle sidecar/controller. The Ingress failure domain exists only to provide the unified public L7 transport edge.
 
 #### Native Linux
 
@@ -299,7 +307,7 @@ The architecture distinguishes application behavior invariants from deployment s
 
 Application behavior invariants:
 
-- Manager crash, restart, or temporary unavailability MUST NOT cause the control path to intentionally terminate a healthy CPA gateway. While the Runtime container remains healthy, model traffic continues directly through `AI Client -> CPA -> Provider` without traversing Manager.
+- Manager crash, restart, or temporary unavailability MUST NOT cause the control path to intentionally terminate a healthy CPA gateway. While Ingress and the Runtime container remain healthy, model traffic continues through `AI Client -> Ingress -> CPA/Gateway -> Provider` without traversing Manager or Supervisor.
 - CPA child crash, exit, or readiness failure MUST NOT make Manager Console/API unavailable. Manager MUST be able to eventually observe and report the CPA runtime condition; the concrete lifecycle states are defined by later lifecycle work.
 - Runtime Supervisor MUST NOT intentionally terminate a healthy CPA merely because Manager disconnects, a status request fails, ordinary reconciliation fails, or the control path has a transient failure.
 - Manager health MUST be independently observable from CPA runtime health.
@@ -307,6 +315,8 @@ Application behavior invariants:
 Deployment survival guarantee:
 
 - Manager container failure MUST NOT stop an otherwise healthy Runtime container. Docker Phase 1 treats Manager and Runtime as separate deployment/container failure domains; this does not claim independence from a shared host or container-engine failure.
+- Runtime/Gateway container failure MUST NOT make an otherwise healthy Manager route unavailable through a healthy Ingress.
+- Ingress failure makes the unified public endpoint unavailable without merging Manager and Runtime ownership or process lifecycles.
 - Docker Phase 1 does not guarantee CPA child survival after Runtime Supervisor PID 1 exits or the Runtime container crashes, stops, or is killed. Supervisor and CPA share that deployment failure domain.
 
 Logical ownership, security/authority, state ownership, process role, and deployment failure domain are separate architectural dimensions. Sharing the Runtime container failure domain does not merge ownership: Runtime Supervisor remains the Execution Plane, and CPA remains the Data Plane.
@@ -317,6 +327,7 @@ Logical ownership, security/authority, state ownership, process role, and deploy
 - Supervisor executes exact-version CPA runtime operations, staging, switch, readiness verification, and rollback.
 - Manager and CPA updates are independent recovery domains; `Update All` is orchestration, not one atomic rollback transaction.
 - Supervisor self-replacement is not part of the first Runtime Foundation implementation. Supervisor is updated by the outer CPAMP package/container/install mechanism.
+- A build-time checksum-pinned embedded CPA artifact establishes image contents; it does not grant Runtime, Ingress, or container bootstrap updater authority.
 
 ## Phase 1 implementation boundary
 
@@ -328,6 +339,8 @@ Phase 1 MUST establish:
 - Runtime Protocol v1 handshake/status/capability slice.
 - Supervisor private durable operation journal.
 - Full Docker Embedded lifecycle foundation.
+- Stateless single-public-port Ingress and unified Embedded Compose wiring.
+- Build-time pinned embedded engine packaging with isolated Manager and Runtime storage.
 - Tests enforcing failure-domain and storage-ownership invariants.
 
 Phase 1 does NOT require:
@@ -344,7 +357,7 @@ Phase 1 does NOT require:
 
 ## Consequences
 
-This design introduces a third process role in Embedded mode, but keeps it intentionally thin. The benefit is an explicit execution boundary without making Supervisor another product backend or putting model traffic through CPAMP.
+This design introduces separate Supervisor and Ingress process roles in Embedded mode, and keeps both intentionally narrow. The benefit is an explicit execution boundary plus one public product endpoint without making Supervisor another product backend or putting model traffic through Manager.
 
 HTTP/JSON is chosen for Phase 1 implementation speed, portability, testability, and observability. The protocol semantics are independent from transport so a stronger local IPC transport can be added later if required.
 
@@ -352,13 +365,15 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 
 ## Non-negotiable invariants
 
-1. Client model traffic never traverses Manager or Supervisor.
+1. Client model traffic traverses only Ingress and CPA/Gateway before its provider; it never traverses Manager or Supervisor.
 2. Supervisor never opens Manager databases.
 3. Supervisor is not product configuration or long-lived secret authority.
 4. Manager may access CPA Management API directly; Supervisor is lifecycle execution, not a management proxy.
 5. Embedded and External share the same application-level RuntimeClient contract.
 6. Privileged runtime side effects require durable operation intent first.
-7. Docker Phase 1 keeps the Manager and Runtime containers as separate deployment failure domains; Supervisor and CPA keep distinct roles, ownership, state, and authority within the shared Runtime container failure domain.
+7. Docker Phase 1 keeps Ingress, Manager, and Runtime as separate deployment failure domains; only Ingress publishes the default host port, while Supervisor and CPA keep distinct roles, ownership, state, and authority within the shared Runtime container failure domain.
 8. Before mutation capability is enabled, each Runtime Supervisor process incarnation must establish a new authority epoch by freshly sampling an opaque random generation; Manager only observes and echoes it.
 9. Mutations fence both Runtime identity and generation before idempotency resolution, durable intent, or side effects.
 10. For one Runtime identity, durable operation ID idempotency spans Supervisor generations: replaying the same logical request never executes its side effect twice, and conflicting reuse fails closed.
+11. Ingress owns no product configuration or lifecycle authority, persists no product state, and receives no Runtime, Manager, CPA Management, or provider credential.
+12. Container/bootstrap startup may create internal transport and seed state, but MUST NOT infer desired running state or start CPA outside a typed durable lifecycle mutation.

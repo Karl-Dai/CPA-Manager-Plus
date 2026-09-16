@@ -1,0 +1,51 @@
+FROM --platform=$BUILDPLATFORM alpine:3.21 AS cpa-download
+
+ARG TARGETOS
+ARG TARGETARCH
+RUN set -eu; \
+    test "$TARGETOS" = "linux"; \
+    cpa_version="7.3.3"; \
+    case "$TARGETARCH" in \
+      amd64) asset_arch="amd64"; asset_sha256="7af8c99cd08eee3ccc81d1596e8a31785674d3de6bd7ec61416d59493dd8fc01" ;; \
+      arm64) asset_arch="aarch64"; asset_sha256="5f320e3fae52af00f07b78201311e9d096b36e759441d948de48a10f49e71883" ;; \
+      *) echo "unsupported CPA target architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    asset_name="CLIProxyAPI_${cpa_version}_linux_${asset_arch}.tar.gz"; \
+    apk add --no-cache ca-certificates wget; \
+    wget -qO "/tmp/${asset_name}" "https://github.com/router-for-me/CLIProxyAPI/releases/download/v${cpa_version}/${asset_name}"; \
+    printf '%s  %s\n' "$asset_sha256" "/tmp/${asset_name}" | sha256sum -c -; \
+    mkdir -p /out; \
+    tar -xOzf "/tmp/${asset_name}" cli-proxy-api > /out/cli-proxy-api; \
+    chmod 0755 /out/cli-proxy-api
+
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS supervisor-build
+
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src/apps/runtime-supervisor
+COPY apps/runtime-supervisor/go.mod apps/runtime-supervisor/go.sum ./
+RUN go mod download
+COPY apps/runtime-supervisor ./
+RUN test "$TARGETOS" = "linux"
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/cpamp-runtime-supervisor ./cmd/cpamp-runtime-supervisor
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=supervisor-build /out/cpamp-runtime-supervisor /usr/local/bin/cpamp-runtime-supervisor
+COPY --from=cpa-download /out/cli-proxy-api /usr/local/bin/cli-proxy-api
+COPY docker/runtime/entrypoint.sh /usr/local/bin/cpamp-runtime-entrypoint
+COPY docker/runtime/config.seed.yaml /usr/local/share/cpamp/runtime/config.seed.yaml
+
+ENV CPAMP_RUNTIME_ADDR=0.0.0.0:9081 \
+    CPAMP_RUNTIME_IDENTITY=embedded-default \
+    CPAMP_RUNTIME_JOURNAL_PATH=/runtime/supervisor/operations.sqlite \
+    CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317 \
+    CPAMP_CPA_EXECUTABLE=/usr/local/bin/cli-proxy-api
+
+EXPOSE 8317 9081
+ENTRYPOINT ["/usr/local/bin/cpamp-runtime-entrypoint"]
+CMD ["/usr/local/bin/cpamp-runtime-supervisor"]

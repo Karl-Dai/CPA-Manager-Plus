@@ -6,6 +6,7 @@ const CHECK_NAMES = [
   'frontend',
   'manager_server',
   'runtime_supervisor',
+  'ingress',
   'windows_sqlite',
   'native_control',
   'docker',
@@ -55,7 +56,12 @@ const triggersManagerServer = (filePath) =>
 
 const triggersRuntimeSupervisor = (filePath) =>
   startsWithPath(filePath, 'apps/runtime-supervisor') ||
+  startsWithPath(filePath, 'docker/runtime') ||
+  filePath === 'Dockerfile.runtime' ||
   startsWithPath(filePath, 'bin/ci/runtime-boundary');
+
+const triggersIngress = (filePath) =>
+  startsWithPath(filePath, 'apps/ingress') || filePath === 'Dockerfile.ingress';
 
 const triggersNativeControl = (filePath) =>
   startsWithPath(filePath, 'bin/native') ||
@@ -67,7 +73,15 @@ const triggersNativeControl = (filePath) =>
 const triggersDocker = (filePath) =>
   startsWithPath(filePath, 'apps/web') ||
   startsWithPath(filePath, 'apps/manager-server') ||
+  startsWithPath(filePath, 'apps/runtime-supervisor') ||
+  startsWithPath(filePath, 'apps/ingress') ||
+  startsWithPath(filePath, 'docker') ||
+  filePath.startsWith('bin/ci/runtime12-') ||
+  filePath === 'bin/ci/validate-runtime12-compose.mjs' ||
   filePath === 'Dockerfile.manager-server' ||
+  filePath === 'Dockerfile.ingress' ||
+  filePath === 'Dockerfile.runtime' ||
+  filePath === 'docker-compose.yml' ||
   filePath === 'docker-compose.manager.yml' ||
   filePath === '.dockerignore' ||
   filePath === 'package.json' ||
@@ -95,6 +109,7 @@ export const classifyChangedFiles = (changedFiles) => {
     frontend,
     manager_server: managerServer,
     runtime_supervisor: files.some(triggersRuntimeSupervisor),
+    ingress: files.some(triggersIngress),
     windows_sqlite: managerServer,
     native_control: files.some(triggersNativeControl),
     docker: files.some(triggersDocker),
