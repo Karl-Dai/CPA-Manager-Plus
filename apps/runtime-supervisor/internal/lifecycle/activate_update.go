@@ -89,7 +89,9 @@ func (e *Executor) EnableActivateUpdate(
 		selected = resolved
 	}
 	if err := refreshSelectedDescriptor(observer, &selected); err != nil {
-		return fmt.Errorf("configure selected active artifact: %w", err)
+		if selected.IsFinalizedStage() || !errors.Is(err, ErrActiveArtifactUnavailable) {
+			return fmt.Errorf("configure selected active artifact: %w", err)
+		}
 	}
 	e.active = selected
 	e.executable = selected.ExecutablePath

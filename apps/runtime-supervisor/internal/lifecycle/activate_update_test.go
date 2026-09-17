@@ -145,6 +145,24 @@ func newActivationFixture(t *testing.T) *activationFixture {
 	return f
 }
 
+func TestEnableActivateUpdateAllowsUnavailableBundledBaselineButRejectsUnavailableSelectedStage(t *testing.T) {
+	base := newStartFixture(t)
+	observer := &activationObserver{events: &base.events, byPath: map[string]artifact.ID{}}
+	selections := &activationSelections{events: &base.events}
+	ready := &activationReady{events: &base.events, process: &activationProcess{events: &base.events}}
+
+	if err := base.starter.EnableActivateUpdate(selection.Bundled(activationPathA, ""), observer, selections, ready); err != nil {
+		t.Fatalf("unavailable bundled baseline should defer failure to Start/Activate: %v", err)
+	}
+	selected := selection.Descriptor{
+		Source: selection.SourceFinalized, Version: "7.3.4", ArtifactID: activeArtifactB,
+		ExecutablePath: activationPathB, MetadataPath: "/runtime/stage/artifact.json",
+	}
+	if err := base.starter.EnableActivateUpdate(selected, observer, selections, ready); !errors.Is(err, ErrActiveArtifactUnavailable) {
+		t.Fatalf("unavailable persisted selection error = %v", err)
+	}
+}
+
 type activationProcess struct {
 	events       *[]string
 	observation  cpaprocess.Observation
