@@ -32,6 +32,7 @@ type Config struct {
 	Stop              StopExecutor
 	Restart           RestartExecutor
 	PrepareUpdate     PrepareUpdateExecutor
+	ActivateUpdate    ActivateUpdateExecutor
 	Status            StatusObserver
 	Recovery          RecoveryStatusObserver
 	Artifact          ArtifactStatusObserver
@@ -61,6 +62,7 @@ type handler struct {
 	stop              StopExecutor
 	restart           RestartExecutor
 	prepareUpdate     PrepareUpdateExecutor
+	activateUpdate    ActivateUpdateExecutor
 	status            StatusObserver
 	recovery          RecoveryStatusObserver
 	artifact          ArtifactStatusObserver
@@ -120,6 +122,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		stop:              config.Stop,
 		restart:           config.Restart,
 		prepareUpdate:     config.PrepareUpdate,
+		activateUpdate:    config.ActivateUpdate,
 		status:            config.Status,
 		recovery:          config.Recovery,
 		artifact:          config.Artifact,
@@ -130,7 +133,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	method := http.MethodGet
 	switch r.URL.Path {
 	case handshakePath, statusPath:
-	case startPath, stopPath, restartPath, prepareUpdatePath:
+	case startPath, stopPath, restartPath, prepareUpdatePath, activateUpdatePath:
 		method = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "runtime endpoint not found")
@@ -195,6 +198,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.submitRestart(w, r)
 	case prepareUpdatePath:
 		h.submitPrepareUpdate(w, r)
+	case activateUpdatePath:
+		h.submitActivateUpdate(w, r)
 	}
 }
 
@@ -210,7 +215,7 @@ func requestsFeature(r *http.Request, feature string) bool {
 }
 
 func (h *handler) capabilities() []string {
-	capabilities := make([]string, 0, 4)
+	capabilities := make([]string, 0, 5)
 	if h.start != nil {
 		capabilities = append(capabilities, CapabilityStart)
 	}
@@ -222,6 +227,9 @@ func (h *handler) capabilities() []string {
 	}
 	if h.prepareUpdate != nil {
 		capabilities = append(capabilities, CapabilityPrepareUpdate)
+	}
+	if h.activateUpdate != nil {
+		capabilities = append(capabilities, CapabilityActivateUpdate)
 	}
 	return capabilities
 }

@@ -135,6 +135,10 @@ func (e *Executor) executeAutomaticRecovery(epoch uint64, crashedInstanceID uint
 	if e.closed.Load() {
 		return
 	}
+	if e.activeSelectionAmbiguous {
+		e.disableRecovery(RecoveryStateManualIntervention)
+		return
+	}
 
 	e.recoveryMu.Lock()
 	if e.closed.Load() || e.recoveryEpoch != epoch ||
@@ -181,7 +185,7 @@ func (e *Executor) executeAutomaticRecovery(epoch uint64, crashedInstanceID uint
 	e.cancelRecoveryTimer = nil
 	e.recoveryMu.Unlock()
 
-	started, spawnErr := e.process.Start(executionContext, cpaprocess.StartSpec{Executable: e.executable})
+	started, spawnErr := e.process.Start(executionContext, cpaprocess.StartSpec{Executable: e.currentExecutableLocked()})
 	if spawnErr != nil {
 		if _, err := e.journal.Complete(
 			executionContext,

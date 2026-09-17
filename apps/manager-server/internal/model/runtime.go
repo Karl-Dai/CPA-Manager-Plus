@@ -165,10 +165,11 @@ type RuntimeRecoveryObservation struct {
 type RuntimeCapability string
 
 const (
-	RuntimeCapabilityStart         RuntimeCapability = "start"
-	RuntimeCapabilityStop          RuntimeCapability = "stop"
-	RuntimeCapabilityRestart       RuntimeCapability = "restart"
-	RuntimeCapabilityPrepareUpdate RuntimeCapability = "prepare_update"
+	RuntimeCapabilityStart          RuntimeCapability = "start"
+	RuntimeCapabilityStop           RuntimeCapability = "stop"
+	RuntimeCapabilityRestart        RuntimeCapability = "restart"
+	RuntimeCapabilityPrepareUpdate  RuntimeCapability = "prepare_update"
+	RuntimeCapabilityActivateUpdate RuntimeCapability = "activate_update"
 )
 
 type RuntimeCapabilities []RuntimeCapability
@@ -202,15 +203,16 @@ type RuntimeObservedStatus struct {
 type RuntimeOperationType string
 
 const (
-	RuntimeOperationStart         RuntimeOperationType = "start"
-	RuntimeOperationStop          RuntimeOperationType = "stop"
-	RuntimeOperationRestart       RuntimeOperationType = "restart"
-	RuntimeOperationPrepareUpdate RuntimeOperationType = "prepare_update"
+	RuntimeOperationStart          RuntimeOperationType = "start"
+	RuntimeOperationStop           RuntimeOperationType = "stop"
+	RuntimeOperationRestart        RuntimeOperationType = "restart"
+	RuntimeOperationPrepareUpdate  RuntimeOperationType = "prepare_update"
+	RuntimeOperationActivateUpdate RuntimeOperationType = "activate_update"
 )
 
 func (t RuntimeOperationType) IsValid() bool {
 	switch t {
-	case RuntimeOperationStart, RuntimeOperationStop, RuntimeOperationRestart, RuntimeOperationPrepareUpdate:
+	case RuntimeOperationStart, RuntimeOperationStop, RuntimeOperationRestart, RuntimeOperationPrepareUpdate, RuntimeOperationActivateUpdate:
 		return true
 	default:
 		return false
@@ -267,6 +269,25 @@ type RuntimePrepareUpdateRequest struct {
 	RuntimeMutationRequest
 	ExpectedActiveArtifactID RuntimeArtifactID
 	TargetVersion            string
+}
+
+type RuntimeActivateUpdateRequest struct {
+	RuntimeMutationRequest
+	ExpectedActiveArtifactID RuntimeArtifactID
+	TargetVersion            string
+}
+
+func (r RuntimeActivateUpdateRequest) Validate() error {
+	if err := r.RuntimeMutationRequest.Validate(); err != nil {
+		return err
+	}
+	if !r.ExpectedActiveArtifactID.IsValid() {
+		return errors.New("expected active artifact ID must be canonical SHA-256")
+	}
+	if !validRuntimeTargetVersion(r.TargetVersion) {
+		return errors.New("target version must be an exact canonical release version")
+	}
+	return nil
 }
 
 func (r RuntimePrepareUpdateRequest) Validate() error {

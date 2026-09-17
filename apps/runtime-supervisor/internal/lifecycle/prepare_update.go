@@ -9,6 +9,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
@@ -36,6 +37,10 @@ var prepareUpdateExecutionTimeout = PrepareUpdateExecutionTimeout
 type activeArtifactRefresher interface {
 	Refresh() error
 	Observation() *artifact.Observation
+}
+
+type selectedArtifactRefresher interface {
+	RefreshFrom(executablePath, metadataPath string) error
 }
 
 type updatePreparer interface {
@@ -140,7 +145,11 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 		e.mu.Unlock()
 		return operation, nil
 	}
-	if err := refreshExpectedActiveArtifact(observer, request.ExpectedActiveArtifactID); err != nil {
+	if e.activeSelectionAmbiguous {
+		e.mu.Unlock()
+		return journal.Operation{}, journal.ErrOperationStateConflict
+	}
+	if err := refreshExpectedActiveArtifact(observer, e.active, request.ExpectedActiveArtifactID); err != nil {
 		e.mu.Unlock()
 		return journal.Operation{}, err
 	}
@@ -195,10 +204,15 @@ func (e *Executor) admitPrepareWorker() bool {
 	return true
 }
 
-func refreshExpectedActiveArtifact(observer activeArtifactRefresher, expected artifact.ID) error {
+func refreshExpectedActiveArtifact(observer activeArtifactRefresher, selected selection.Descriptor, expected artifact.ID) error {
 	// Manifest/version errors do not invalidate an otherwise exact executable
 	// digest observation. An unavailable executable or invalid observation does.
-	refreshErr := observer.Refresh()
+	var refreshErr error
+	if dynamic, ok := observer.(selectedArtifactRefresher); ok && selected.ExecutablePath != "" {
+		refreshErr = dynamic.RefreshFrom(selected.ExecutablePath, selected.MetadataPath)
+	} else {
+		refreshErr = observer.Refresh()
+	}
 	active := observer.Observation()
 	if errors.Is(refreshErr, artifact.ErrExecutableUnavailable) || active == nil || !active.ArtifactID.IsValid() {
 		return ErrActiveArtifactUnavailable
@@ -249,7 +263,10 @@ func (e *Executor) beginPrepareExecution(
 	if found {
 		return operation, false, nil
 	}
-	if err := refreshExpectedActiveArtifact(observer, expected); err != nil {
+	if e.activeSelectionAmbiguous {
+		return journal.Operation{}, false, journal.ErrOperationStateConflict
+	}
+	if err := refreshExpectedActiveArtifact(observer, e.active, expected); err != nil {
 		return journal.Operation{}, false, err
 	}
 	operation, created, err := e.journal.Begin(ctx, e.authority, intent)

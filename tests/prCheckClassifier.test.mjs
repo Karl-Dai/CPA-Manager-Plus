@@ -202,6 +202,7 @@ describe('PR check classifier', () => {
       'docker-compose.manager.yml',
       'bin/ci/runtime12-docker-smoke.sh',
       'bin/ci/runtime14-failure-e2e.sh',
+      'bin/ci/runtime17-activation-e2e.sh',
       'bin/ci/validate-runtime12-compose.mjs',
     ]) {
       expect(classifyChangedFiles([filePath])).toEqual({
@@ -229,6 +230,7 @@ describe('PR check classifier', () => {
       'docker-compose.yml',
       'bin/ci/runtime12-docker-smoke.sh',
       'bin/ci/runtime14-failure-e2e.sh',
+      'bin/ci/runtime17-activation-e2e.sh',
     ]) {
       expect(classifyChangedFiles([filePath]).docker, filePath).toBe(true);
     }

@@ -148,6 +148,12 @@ func writeMutationError(w http.ResponseWriter, err error, operationName string) 
 		code, message, status = "unsupported_staging_platform", "update staging is unsupported", http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrReleaseMetadataInvalid):
 		code, message, status = "release_metadata_invalid", "official release metadata is unavailable or invalid", http.StatusBadGateway
+	case errors.Is(err, lifecycle.ErrUnsupportedActivation):
+		code, message, status = "unsupported_operation", "update activation is unsupported", http.StatusBadRequest
+	case errors.Is(err, lifecycle.ErrTargetStageUnavailable):
+		code, message, status = "target_stage_unavailable", "finalized target stage is unavailable", http.StatusConflict
+	case errors.Is(err, lifecycle.ErrTargetStageCorrupt):
+		code, message, status = "target_stage_corrupt", "finalized target stage is corrupt", http.StatusConflict
 	}
 	writeError(w, status, code, message)
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 )
 
 var (
@@ -73,16 +74,20 @@ type process interface {
 // evidence, while updater staging has its own narrow gate and cpaprocess
 // remains the final ownership fence.
 type Executor struct {
-	mu         sync.Mutex
-	authority  journal.Authority
-	journal    operationJournal
-	process    process
-	executable string
-	artifact   activeArtifactRefresher
-	updates    updatePreparer
-	closed     atomic.Bool
-	closeOnce  sync.Once
-	closeErr   error
+	mu                       sync.Mutex
+	authority                journal.Authority
+	journal                  operationJournal
+	process                  process
+	executable               string
+	artifact                 activeArtifactRefresher
+	updates                  updatePreparer
+	active                   selection.Descriptor
+	selections               activeSelectionStore
+	readiness                activationReadiness
+	activeSelectionAmbiguous bool
+	closed                   atomic.Bool
+	closeOnce                sync.Once
+	closeErr                 error
 
 	// Prepare staging is serialized independently from lifecycle/recovery
 	// execution. The admission mutex makes worker registration and shutdown a
@@ -160,6 +165,9 @@ func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Ope
 		// Retained accepted/running evidence is replayed, never resumed here.
 		return operation, nil
 	}
+	if e.activeSelectionAmbiguous {
+		return journal.Operation{}, journal.ErrOperationStateConflict
+	}
 	switch e.process.Observe().State {
 	case cpaprocess.StateNotStarted, cpaprocess.StateExited:
 		// cpaprocess only publishes exited after a confirmed Wait/reap.
@@ -187,7 +195,7 @@ func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Ope
 	// A newly accepted explicit run supersedes any prior crash timer. Only its
 	// own durable terminal success may grant a fresh recovery epoch.
 	e.disableRecovery(RecoveryStateInactive)
-	started, spawnErr := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.executable})
+	started, spawnErr := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.currentExecutableLocked()})
 	state, failureCode := journal.StateSucceeded, ""
 	if spawnErr != nil {
 		state, failureCode = journal.StateFailed, "process_start_failed"
@@ -206,6 +214,17 @@ func (e *Executor) Start(ctx context.Context, request StartRequest) (journal.Ope
 	e.armFreshRecovery(started)
 	// Success means OS spawn and ownership publication, not Runtime readiness.
 	return result, nil
+}
+
+func (e *Executor) currentExecutableLocked() string {
+	return e.currentDescriptorLocked().ExecutablePath
+}
+
+func (e *Executor) currentDescriptorLocked() selection.Descriptor {
+	if e.active.ExecutablePath != "" {
+		return e.active
+	}
+	return selection.Bundled(e.executable, "")
 }
 
 func submissionError(err error) error {

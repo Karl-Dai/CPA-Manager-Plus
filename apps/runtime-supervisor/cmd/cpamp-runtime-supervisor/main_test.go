@@ -166,6 +166,15 @@ func TestPrepareUpdateTransportBudgetIsDedicatedAndOrdered(t *testing.T) {
 		t.Fatalf("prepare response budget = %s, execution=%s persistence=%s release=%s", prepareUpdateResponseTimeout,
 			lifecycle.PrepareUpdateExecutionTimeout, lifecycle.PrepareUpdateTerminalPersistenceTimeout, runtimeupdate.ReleaseClientTimeout)
 	}
+	if activateUpdateResponseTimeout <= lifecycle.ActivationExecutionTimeout+
+		lifecycle.ActivationTerminalPersistenceTimeout ||
+		lifecycle.ActivationCandidateReadinessTimeout+lifecycle.ActivationRollbackReadinessTimeout >=
+			lifecycle.ActivationExecutionTimeout {
+		t.Fatalf("activate response budget=%s execution=%s persistence=%s candidate=%s rollback=%s",
+			activateUpdateResponseTimeout, lifecycle.ActivationExecutionTimeout,
+			lifecycle.ActivationTerminalPersistenceTimeout, lifecycle.ActivationCandidateReadinessTimeout,
+			lifecycle.ActivationRollbackReadinessTimeout)
+	}
 }
 
 func TestPrepareUpdateResponseDeadlineIsRouteSpecific(t *testing.T) {
@@ -176,6 +185,7 @@ func TestPrepareUpdateResponseDeadlineIsRouteSpecific(t *testing.T) {
 	}{
 		{name: "ordinary lifecycle", path: "/v1/runtime/operations/start"},
 		{name: "prepare update", path: prepareUpdateResponsePath, deadlines: 2},
+		{name: "activate update", path: activateUpdateResponsePath, deadlines: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			writer := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
@@ -187,8 +197,11 @@ func TestPrepareUpdateResponseDeadlineIsRouteSpecific(t *testing.T) {
 			if len(writer.deadlines) != test.deadlines {
 				t.Fatalf("write deadlines = %d, want %d", len(writer.deadlines), test.deadlines)
 			}
-			if test.deadlines > 0 && !writer.deadlines[0].After(time.Now().Add(11*time.Minute)) {
+			if test.path == prepareUpdateResponsePath && !writer.deadlines[0].After(time.Now().Add(11*time.Minute)) {
 				t.Fatalf("prepare deadline = %s, want route budget near %s", writer.deadlines[0], prepareUpdateResponseTimeout)
+			}
+			if test.path == activateUpdateResponsePath && !writer.deadlines[0].After(time.Now().Add(2*time.Minute)) {
+				t.Fatalf("activate deadline = %s, want route budget near %s", writer.deadlines[0], activateUpdateResponseTimeout)
 			}
 		})
 	}

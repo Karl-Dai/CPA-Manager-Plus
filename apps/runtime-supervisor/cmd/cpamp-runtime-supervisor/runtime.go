@@ -16,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
@@ -56,13 +57,42 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 	}
 	runtime := &runtimeHandler{}
 	if cfg.journalPath != "" {
-		artifactObserver := artifact.NewObserver(cfg.cpaExecutable, cfg.cpaArtifactManifest)
-		refreshArtifact := func() {
-			if err := artifactObserver.Refresh(); err != nil {
-				log.Printf("active Gateway artifact metadata is incomplete: %v", err)
-			}
+		supervisorRoot := filepath.Dir(cfg.journalPath)
+		stageRoot := filepath.Join(supervisorRoot, "artifacts", "cpa")
+		stageStore, err := runtimeupdate.NewStore(stageRoot)
+		if err != nil {
+			return nil, fmt.Errorf("configure trusted stage storage: %w", err)
 		}
-		refreshArtifact()
+		selectionStore, err := selection.NewStore(filepath.Join(supervisorRoot, "active", "cpa"), stageStore)
+		if err != nil {
+			return nil, fmt.Errorf("configure active selection storage: %w", err)
+		}
+		selected, err := selectionStore.Load(selection.Bundled(cfg.cpaExecutable, cfg.cpaArtifactManifest))
+		if err != nil {
+			return nil, fmt.Errorf("resolve active selection: %w", err)
+		}
+		artifactObserver := artifact.NewObserver(selected.ExecutablePath, selected.MetadataPath)
+		refreshArtifact := func(spec cpaprocess.StartSpec) error {
+			metadataPath := cfg.cpaArtifactManifest
+			staged := spec.Executable != cfg.cpaExecutable
+			if staged {
+				metadataPath = filepath.Join(filepath.Dir(spec.Executable), "artifact.json")
+			}
+			if err := artifactObserver.RefreshFrom(spec.Executable, metadataPath); err != nil {
+				log.Printf("active Gateway artifact metadata is incomplete: %v", err)
+				if staged {
+					return err
+				}
+			}
+			return nil
+		}
+		initialRefreshErr := artifactObserver.RefreshFrom(selected.ExecutablePath, selected.MetadataPath)
+		if selected.IsFinalizedStage() && initialRefreshErr != nil {
+			return nil, fmt.Errorf("revalidate persisted active selection: %w", initialRefreshErr)
+		}
+		if initialRefreshErr != nil {
+			log.Printf("active Gateway artifact metadata is incomplete: %v", initialRefreshErr)
+		}
 		child := cpaprocess.NewManager(refreshArtifact)
 		observer, err := readiness.New(child, cfg.cpaAddr)
 		if err != nil {
@@ -75,13 +105,16 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		runtime.executor, err = lifecycle.NewExecutor(journal.Authority{
 			RuntimeIdentity:   strings.TrimSpace(cfg.runtimeIdentity),
 			RuntimeGeneration: cfg.runtimeGeneration,
-		}, store, child, cfg.cpaExecutable)
+		}, store, child, selected.ExecutablePath)
 		if err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
 		if runtimeupdate.SupportedPlatform(goruntime.GOOS, goruntime.GOARCH) {
-			stageRoot := filepath.Join(filepath.Dir(cfg.journalPath), "artifacts", "cpa")
-			preparer, prepareErr := runtimeupdate.NewPreparer(stageRoot)
+			if err := runtime.executor.EnableActivateUpdate(selected, artifactObserver, selectionStore, observer); err != nil {
+				return nil, errors.Join(fmt.Errorf("enable update activation: %w", err), runtime.executor.Close())
+			}
+			settings.ActivateUpdate = runtime.executor
+			preparer, prepareErr := runtimeupdate.NewPreparerWithStore(stageStore)
 			if prepareErr != nil {
 				return nil, errors.Join(fmt.Errorf("configure trusted update staging: %w", prepareErr), runtime.executor.Close())
 			}
