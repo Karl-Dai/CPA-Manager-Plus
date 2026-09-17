@@ -482,6 +482,135 @@ func TestPrepareUpdatePersistsStableTerminalFailureAndDoesNotRetry(t *testing.T)
 	}
 }
 
+func TestPrepareUpdateQueueWaitConsumesExecutionBudget(t *testing.T) {
+	origTimeout := prepareUpdateExecutionTimeout
+	prepareUpdateExecutionTimeout = 40 * time.Millisecond
+	t.Cleanup(func() {
+		prepareUpdateExecutionTimeout = origTimeout
+	})
+
+	f := newPrepareFixture(t, activeArtifactA)
+	stageEntered := make(chan struct{})
+	stageRelease := make(chan struct{})
+	f.preparer.stageEntered = stageEntered
+	f.preparer.stageRelease = stageRelease
+
+	aResult := make(chan struct {
+		operation journal.Operation
+		err       error
+	}, 1)
+	go func() {
+		op, err := f.starter.PrepareUpdate(t.Context(), prepareUpdateRequest("prepare-a", "7.3.3", activeArtifactA))
+		aResult <- struct {
+			operation journal.Operation
+			err       error
+		}{operation: op, err: err}
+	}()
+
+	select {
+	case <-stageEntered:
+	case <-time.After(time.Second):
+		t.Fatal("prepare A did not enter stage")
+	}
+
+	resolveCallsBeforeB := f.preparer.resolveCalls
+	stageCallsBeforeB := f.preparer.stageCalls
+
+	bResult := make(chan struct {
+		operation journal.Operation
+		err       error
+	}, 1)
+	go func() {
+		op, err := f.starter.PrepareUpdate(t.Context(), prepareUpdateRequest("prepare-b", "7.3.4", activeArtifactA))
+		bResult <- struct {
+			operation journal.Operation
+			err       error
+		}{operation: op, err: err}
+	}()
+
+	// Wait long enough for B's total execution budget (40ms) to expire while waiting in queue.
+	time.Sleep(80 * time.Millisecond)
+
+	// Release A. A finishes staging and records successful completion.
+	close(stageRelease)
+
+	select {
+	case res := <-aResult:
+		if res.err != nil || res.operation.State != journal.StateSucceeded {
+			t.Fatalf("prepare A result = %+v", res)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepare A did not complete after stage release")
+	}
+
+	// B acquires prepareMu, detects that the operation budget expired while queued,
+	// and exits immediately with DeadlineExceeded without executing any preconditions,
+	// release lookup, or staging.
+	select {
+	case res := <-bResult:
+		if !errors.Is(res.err, context.DeadlineExceeded) {
+			t.Fatalf("prepare B error = %v, want DeadlineExceeded", res.err)
+		}
+		if res.operation != (journal.Operation{}) {
+			t.Fatalf("prepare B returned non-empty operation: %+v", res.operation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepare B did not exit after acquiring prepareMu")
+	}
+
+	// 1. Release metadata Resolve was called only once (by A, zero times by B)
+	if f.preparer.resolveCalls != resolveCallsBeforeB {
+		t.Fatalf("prepare B called release Resolve: calls before=%d, after=%d", resolveCallsBeforeB, f.preparer.resolveCalls)
+	}
+	// 2. Stage was called only once (by A, zero times by B)
+	if f.preparer.stageCalls != stageCallsBeforeB {
+		t.Fatalf("prepare B called Stage: calls before=%d, after=%d", stageCallsBeforeB, f.preparer.stageCalls)
+	}
+	// 3. Artifact Refresh was called twice by A (initial fence + second fence before begin), zero times by B
+	refreshCalls := 0
+	for _, ev := range f.events {
+		if ev == "refresh-artifact" {
+			refreshCalls++
+		}
+		if strings.Contains(ev, "7.3.4") {
+			t.Fatalf("unexpected event for prepare-b version 7.3.4: %s", ev)
+		}
+	}
+	if refreshCalls != 2 {
+		t.Fatalf("artifact refresh calls = %d, want 2 (only A)", refreshCalls)
+	}
+	// 4. Zero journal Begin, MarkRunning, Complete for prepare-b
+	for _, ev := range f.events {
+		if strings.Contains(ev, "prepare-b") {
+			t.Fatalf("unexpected event for prepare-b in events: %s", ev)
+		}
+	}
+	_, found, err := f.journal.Resolve(t.Context(), f.starter.authority, journal.Intent{
+		OperationID:               "prepare-b",
+		OperationType:             "prepare_update",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		RequestFingerprint:        sha256.Sum256([]byte("runtime.prepare_update/v1:{targetVersion:7.3.4}")),
+	})
+	if err != nil || found {
+		t.Fatalf("prepare-b should not have durable journal record: found=%v, err=%v", found, err)
+	}
+}
+
+func TestPrepareUpdatePreconditionContextPreCheck(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	cancelledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := f.starter.PrepareUpdate(cancelledCtx, prepareUpdateRequest("prepare-cancelled", "7.3.3", activeArtifactA))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PrepareUpdate() error = %v, want context.Canceled", err)
+	}
+	if len(f.events) != 0 {
+		t.Fatalf("cancelled prepare produced events: %v", f.events)
+	}
+}
+
 type prepareFixture struct {
 	*startFixture
 	observer *prepareArtifactObserver

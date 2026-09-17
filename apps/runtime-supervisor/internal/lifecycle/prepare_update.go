@@ -31,6 +31,8 @@ const (
 	PrepareUpdateTerminalPersistenceTimeout = 15 * time.Second
 )
 
+var prepareUpdateExecutionTimeout = PrepareUpdateExecutionTimeout
+
 type activeArtifactRefresher interface {
 	Refresh() error
 	Observation() *artifact.Observation
@@ -84,15 +86,20 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 	}
 	defer e.prepareWorkers.Done()
 
+	operationDeadline := time.Now().Add(prepareUpdateExecutionTimeout)
+	preconditionCtx, cancelPreconditions := context.WithDeadline(ctx, operationDeadline)
+	defer cancelPreconditions()
+	if err := preconditionCtx.Err(); err != nil {
+		return journal.Operation{}, err
+	}
+
 	// Only prepare operations serialize on this narrow updater gate. The shared
 	// lifecycle gate is acquired around durable admission and fresh fencing, but
 	// is released for release network I/O and staging so recovery can proceed.
+	// Serialization queue wait consumes from the bounded execution budget above.
 	e.prepareMu.Lock()
 	defer e.prepareMu.Unlock()
 
-	operationDeadline := time.Now().Add(PrepareUpdateExecutionTimeout)
-	preconditionCtx, cancelPreconditions := context.WithDeadline(ctx, operationDeadline)
-	defer cancelPreconditions()
 	if err := preconditionCtx.Err(); err != nil {
 		return journal.Operation{}, err
 	}
