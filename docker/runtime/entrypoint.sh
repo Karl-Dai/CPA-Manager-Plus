@@ -22,7 +22,35 @@ fi
 token_dir="$(dirname "$token_file")"
 artifact_root="${supervisor_dir}/artifacts"
 artifact_cpa_root="${artifact_root}/cpa"
-mkdir -p "$artifact_cpa_root" "$gateway_dir/auth" "$gateway_dir/logs" "$gateway_dir/plugins" "$token_dir"
+
+require_root_owned_directory() {
+  trusted_directory="$1"
+  if [ ! -d "$trusted_directory" ] || [ -L "$trusted_directory" ]; then
+    echo "Supervisor persisted directory is not a trusted directory: ${trusted_directory}" >&2
+    exit 1
+  fi
+  trusted_owner="$(stat -c '%u' "$trusted_directory")"
+  if [ "$trusted_owner" != 0 ]; then
+    echo "Supervisor persisted directory owner is not root: ${trusted_directory} (uid ${trusted_owner})" >&2
+    exit 1
+  fi
+}
+
+ensure_root_owned_directory() {
+  trusted_directory="$1"
+  if [ -e "$trusted_directory" ] || [ -L "$trusted_directory" ]; then
+    require_root_owned_directory "$trusted_directory"
+    return
+  fi
+  mkdir "$trusted_directory"
+  require_root_owned_directory "$trusted_directory"
+}
+
+require_root_owned_directory "$runtime_root"
+ensure_root_owned_directory "$supervisor_dir"
+ensure_root_owned_directory "$artifact_root"
+ensure_root_owned_directory "$artifact_cpa_root"
+mkdir -p "$gateway_dir/auth" "$gateway_dir/logs" "$gateway_dir/plugins" "$token_dir"
 chown root:root "$runtime_root" "$token_dir"
 chmod 0711 "$runtime_root"
 chmod 0700 "$token_dir"

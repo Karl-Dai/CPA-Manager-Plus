@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/filetrust"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
@@ -95,6 +96,13 @@ func newStore(
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: create selection root: %v", ErrSelectionInvalid, err)
 	}
+	rootInfo, err := os.Lstat(absolute)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: selection root is not a directory", ErrSelectionInvalid)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(rootInfo); err != nil {
+		return nil, fmt.Errorf("%w: selection root: %w", ErrSelectionInvalid, err)
+	}
 	if err := os.Chmod(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: restrict selection root: %v", ErrSelectionInvalid, err)
 	}
@@ -118,6 +126,9 @@ func (s *Store) Load(bundled Descriptor) (Descriptor, error) {
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
 		return Descriptor{}, fmt.Errorf("%w: selection file type or permissions differ", ErrSelectionInvalid)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(info); err != nil {
+		return Descriptor{}, fmt.Errorf("%w: selection file: %w", ErrSelectionInvalid, err)
 	}
 	selected, err := readRecord(selectionPath)
 	if err != nil {

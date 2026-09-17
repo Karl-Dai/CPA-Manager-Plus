@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/filetrust"
 )
 
 const (
@@ -140,6 +141,13 @@ func newStore(root string, executionGID *uint32) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: create staging root: %v", ErrStaging, err)
 	}
+	rootInfo, err := os.Lstat(absolute)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: staging root is not a directory", ErrStaging)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(rootInfo); err != nil {
+		return nil, fmt.Errorf("%w: staging root: %w", ErrStaging, err)
+	}
 	rootMode := os.FileMode(0o700)
 	if executionGID != nil {
 		rootMode = 0o710
@@ -254,6 +262,9 @@ func (s *Store) reconcileFinalizedExecutionCorridor() error {
 		}
 		finalPath := filepath.Join(s.root, entry.Name())
 		if _, found, verifyErr := s.verifyFinalizedPath(finalPath, entry.Name()); verifyErr != nil || !found {
+			if errors.Is(verifyErr, filetrust.ErrUntrustedOwner) {
+				return verifyErr
+			}
 			// Do not widen an invalid or incomplete persisted shape. A selected or
 			// requested stage still fails closed through the existing verifier.
 			continue
@@ -348,7 +359,18 @@ func (s *Store) verifyFinalizedPath(finalPath, version string) (Metadata, bool, 
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return Metadata{}, true, fmt.Errorf("%w: finalized stage is not a directory", ErrStageConflict)
 	}
-	metadata, err := readMetadata(filepath.Join(finalPath, stagedMetadataName))
+	if err := filetrust.RequireCurrentProcessOwner(info); err != nil {
+		return Metadata{}, true, fmt.Errorf("%w: finalized stage directory: %w", ErrStageConflict, err)
+	}
+	metadataPath := filepath.Join(finalPath, stagedMetadataName)
+	metadataInfo, err := os.Lstat(metadataPath)
+	if err != nil || !metadataInfo.Mode().IsRegular() || metadataInfo.Mode().Perm() != 0o444 {
+		return Metadata{}, true, fmt.Errorf("%w: finalized metadata permissions differ", ErrStageConflict)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(metadataInfo); err != nil {
+		return Metadata{}, true, fmt.Errorf("%w: finalized metadata: %w", ErrStageConflict, err)
+	}
+	metadata, err := readMetadata(metadataPath)
 	if err != nil || metadata.Version != version {
 		return Metadata{}, true, fmt.Errorf("%w: finalized metadata differs", ErrStageConflict)
 	}
@@ -357,13 +379,12 @@ func (s *Store) verifyFinalizedPath(finalPath, version string) (Metadata, bool, 
 	if err != nil || !executableInfo.Mode().IsRegular() || executableInfo.Mode().Perm() != 0o755 {
 		return Metadata{}, true, fmt.Errorf("%w: finalized executable type or permissions differ", ErrStageConflict)
 	}
+	if err := filetrust.RequireCurrentProcessOwner(executableInfo); err != nil {
+		return Metadata{}, true, fmt.Errorf("%w: finalized executable: %w", ErrStageConflict, err)
+	}
 	actual, err := digestFile(executablePath, maxExtractedBinaryBytes)
 	if err != nil || actual != metadata.ArtifactID {
 		return Metadata{}, true, fmt.Errorf("%w: finalized executable digest differs", ErrStageConflict)
-	}
-	metadataInfo, err := os.Lstat(filepath.Join(finalPath, stagedMetadataName))
-	if err != nil || !metadataInfo.Mode().IsRegular() || metadataInfo.Mode().Perm() != 0o444 {
-		return Metadata{}, true, fmt.Errorf("%w: finalized metadata permissions differ", ErrStageConflict)
 	}
 	return metadata, true, nil
 }
