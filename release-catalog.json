@@ -182,5 +182,51 @@
       }
     },
     "digest": "sha256:ce68a1bea1467c4ba5bb2e29e1b3e673850cf7eb1974225ae21404f3ef8cbfbe"
+  },
+  "v1.13.0": {
+    "info": {
+      "schema_version": 1,
+      "release": {
+        "version": "v1.13.0",
+        "stage": "stable",
+        "source_commit": "ff361648f0b6d54bb678ae555cd86169142635d0"
+      },
+      "content": {
+        "summary": {
+          "zh": "新增 Devin Provider 的 OAuth、模型识别、额度与计划信息支持，并改进管理员密钥持久化、原生安装升级兼容性和模型价格提醒展示。",
+          "en": "Adds Devin provider support for OAuth, model recognition, quota and plan details, while improving admin-key persistence, native upgrade compatibility, and model-price attention presentation."
+        },
+        "notes": {
+          "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.13.0/docs/release-notes/v1.13.0-zh.md",
+          "en": "https://github.com/seakee/CPA-Manager-Plus/blob/v1.13.0/docs/release-notes/v1.13.0-en.md"
+        }
+      },
+      "update": {
+        "breaking": false,
+        "migration_required": false,
+        "minimum_direct_upgrade_version": null,
+        "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.13.0"
+      },
+      "distribution": {
+        "docker": {
+          "image": "seakee/cpa-manager-plus",
+          "version_tag": "v1.13.0"
+        },
+        "native": {
+          "assets": [
+            "cpa-manager-plus_v1.13.0_darwin_amd64.tar.gz",
+            "cpa-manager-plus_v1.13.0_darwin_arm64.tar.gz",
+            "cpa-manager-plus_v1.13.0_linux_amd64.tar.gz",
+            "cpa-manager-plus_v1.13.0_linux_arm64.tar.gz",
+            "cpa-manager-plus_v1.13.0_windows_amd64.zip",
+            "cpa-manager-plus_v1.13.0_windows_arm64.zip"
+          ]
+        }
+      },
+      "compatibility": {
+        "minimum_cpa_version": "v7.3.2"
+      }
+    },
+    "digest": "sha256:e924d254a48723b5b2032ff05e4e91dec27d5d1c1d940ed602c7604024dbf7d1"
   }
 }
