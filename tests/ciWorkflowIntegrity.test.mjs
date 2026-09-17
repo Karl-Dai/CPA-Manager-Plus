@@ -122,19 +122,23 @@ describe('GitHub Actions workflow integrity', () => {
     expect(requiredJob).toContain('"Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"');
   });
 
-  it('runs Runtime14 and Runtime17 E2E after the focused Docker smoke', () => {
+  it('runs Runtime14, Runtime17, and Runtime18 E2E after the focused Docker smoke', () => {
     const dockerJob = jobBlock(readWorkflow('pr-check.yml'), 'docker-build');
     const focusedSmoke = dockerJob.indexOf('run: bin/ci/runtime12-docker-smoke.sh');
     const failureE2E = dockerJob.indexOf('run: bin/ci/runtime14-failure-e2e.sh');
     const activationE2E = dockerJob.indexOf('run: bin/ci/runtime17-activation-e2e.sh');
+    const segmentationE2E = dockerJob.indexOf('run: bin/ci/runtime18-secret-state-e2e.sh');
 
     expect(focusedSmoke).toBeGreaterThan(-1);
     expect(failureE2E).toBeGreaterThan(focusedSmoke);
     expect(activationE2E).toBeGreaterThan(failureE2E);
+    expect(segmentationE2E).toBeGreaterThan(activationE2E);
     expect(dockerJob).toContain("CPAMP_RUNTIME14_PORT: '18317'");
     expect(dockerJob).toContain("CPAMP_RUNTIME14_SKIP_BUILD: 'true'");
     expect(dockerJob).toContain("CPAMP_RUNTIME17_PORT: '18317'");
     expect(dockerJob).toContain("CPAMP_RUNTIME17_SKIP_BUILD: 'true'");
+    expect(dockerJob).toContain("CPAMP_RUNTIME18_PORT: '18317'");
+    expect(dockerJob).toContain("CPAMP_RUNTIME18_SKIP_BUILD: 'true'");
   });
 
   it('keeps Manager Runtime race, vet, and Windows portability gates', () => {

@@ -95,6 +95,36 @@ func TestPreSpawnValidationFailurePerformsNoOSSpawnOrOwnershipPublication(t *tes
 	}
 }
 
+func TestConfiguredIdentityFailurePerformsNoOSSpawnOrRootFallback(t *testing.T) {
+	manager, err := NewManagerWithIdentity(nil, ChildIdentity{UID: 10001, GID: 10001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.applyIdentity = func(*exec.Cmd, ChildIdentity) error {
+		return errors.New("credential setup rejected")
+	}
+	child := newHelper(t, manager, 0)
+	observation, err := manager.Start(t.Context(), child.spec)
+	if !errors.Is(err, ErrSpawnFailed) || !strings.Contains(err.Error(), "credential setup rejected") ||
+		observation.State != StateNotStarted || manager.Observe().State != StateNotStarted {
+		t.Fatalf("Start() = %+v, %v; observed=%+v", observation, err, manager.Observe())
+	}
+	if starts := child.starts(t); len(starts) != 0 {
+		t.Fatalf("credential failure spawned a fallback child: %v", starts)
+	}
+}
+
+func TestConfiguredIdentityRejectsRootAndDefaultManagerRemainsUnconfigured(t *testing.T) {
+	for _, identity := range []ChildIdentity{{UID: 0, GID: 10001}, {UID: 10001, GID: 0}} {
+		if manager, err := NewManagerWithIdentity(nil, identity); !errors.Is(err, ErrInvalidIdentity) || manager != nil {
+			t.Fatalf("NewManagerWithIdentity(%+v) = %v, %v", identity, manager, err)
+		}
+	}
+	if manager := NewManager(nil); manager.childIdentity != nil {
+		t.Fatalf("default Manager configured child identity = %+v", manager.childIdentity)
+	}
+}
+
 func TestBeforeSpawnRunsOnlyAtEligibleSpawnBoundary(t *testing.T) {
 	var observations int
 	manager := NewManager(func(StartSpec) error { observations++; return nil })

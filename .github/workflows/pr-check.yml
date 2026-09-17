@@ -386,6 +386,12 @@ jobs:
           CPAMP_RUNTIME17_SKIP_BUILD: 'true'
         run: bin/ci/runtime17-activation-e2e.sh
 
+      - name: Run Runtime secret and state segmentation E2E
+        env:
+          CPAMP_RUNTIME18_PORT: '18317'
+          CPAMP_RUNTIME18_SKIP_BUILD: 'true'
+        run: bin/ci/runtime18-secret-state-e2e.sh
+
   demo-docs:
     name: Demo and Docs
     needs: changes

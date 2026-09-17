@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unicode"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 )
 
@@ -40,6 +42,7 @@ type config struct {
 	cpaExecutable       string
 	cpaArtifactManifest string
 	cpaAddr             string
+	cpaIdentity         *cpaprocess.ChildIdentity
 }
 
 type generationSource func() (uint64, error)
@@ -85,6 +88,10 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 	if err := readiness.ValidateAddress(cpaAddr); err != nil {
 		return config{}, fmt.Errorf("CPAMP_RUNTIME_CPA_ADDR: %w", err)
 	}
+	cpaIdentity, err := loadCPAChildIdentity(getenv)
+	if err != nil {
+		return config{}, err
+	}
 	var generation uint64
 	for generation == 0 {
 		var err error
@@ -102,7 +109,29 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 		cpaExecutable:       executable,
 		cpaArtifactManifest: artifactManifest,
 		cpaAddr:             cpaAddr,
+		cpaIdentity:         cpaIdentity,
 	}, nil
+}
+
+func loadCPAChildIdentity(getenv func(string) string) (*cpaprocess.ChildIdentity, error) {
+	uidText := strings.TrimSpace(getenv("CPAMP_RUNTIME_CPA_UID"))
+	gidText := strings.TrimSpace(getenv("CPAMP_RUNTIME_CPA_GID"))
+	if uidText == "" && gidText == "" {
+		return nil, nil
+	}
+	if uidText == "" || gidText == "" {
+		return nil, errors.New("CPAMP_RUNTIME_CPA_UID and CPAMP_RUNTIME_CPA_GID must be configured together")
+	}
+	uid, err := strconv.ParseUint(uidText, 10, 32)
+	if err != nil || uid == 0 {
+		return nil, errors.New("CPAMP_RUNTIME_CPA_UID must be a non-zero uint32")
+	}
+	gid, err := strconv.ParseUint(gidText, 10, 32)
+	if err != nil || gid == 0 {
+		return nil, errors.New("CPAMP_RUNTIME_CPA_GID must be a non-zero uint32")
+	}
+	identity := cpaprocess.ChildIdentity{UID: uint32(uid), GID: uint32(gid)}
+	return &identity, nil
 }
 
 func randomRuntimeGeneration() (uint64, error) {

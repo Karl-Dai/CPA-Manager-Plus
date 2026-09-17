@@ -111,10 +111,25 @@ func (p *Preparer) Stage(ctx context.Context, release Release) (Metadata, error)
 
 // Store owns immutable finalized stages beneath one private persistent root.
 type Store struct {
-	root string
+	root         string
+	executionGID *uint32
 }
 
 func NewStore(root string) (*Store, error) {
+	return newStore(root, nil)
+}
+
+// NewStoreWithExecutionGroup exposes only search access to finalized version
+// directories for the dedicated CPA group. Temporary staging workspaces and
+// the staging root remain non-enumerable to that group.
+func NewStoreWithExecutionGroup(root string, gid uint32) (*Store, error) {
+	if gid == 0 {
+		return nil, fmt.Errorf("%w: execution group must be non-zero", ErrStaging)
+	}
+	return newStore(root, &gid)
+}
+
+func newStore(root string, executionGID *uint32) (*Store, error) {
 	if strings.TrimSpace(root) == "" || strings.ContainsRune(root, '\x00') {
 		return nil, fmt.Errorf("%w: staging root is required", ErrStaging)
 	}
@@ -125,11 +140,21 @@ func NewStore(root string) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: create staging root: %v", ErrStaging, err)
 	}
-	if err := os.Chmod(absolute, 0o700); err != nil {
+	rootMode := os.FileMode(0o700)
+	if executionGID != nil {
+		rootMode = 0o710
+		if err := os.Chown(absolute, -1, int(*executionGID)); err != nil {
+			return nil, fmt.Errorf("%w: assign staging execution group: %v", ErrStaging, err)
+		}
+	}
+	if err := os.Chmod(absolute, rootMode); err != nil {
 		return nil, fmt.Errorf("%w: restrict staging root: %v", ErrStaging, err)
 	}
-	store := &Store{root: absolute}
+	store := &Store{root: absolute, executionGID: executionGID}
 	if err := store.cleanupTemporary(); err != nil {
+		return nil, err
+	}
+	if err := store.reconcileFinalizedExecutionCorridor(); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -187,6 +212,9 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 	if err := writeMetadata(filepath.Join(publication, stagedMetadataName), metadata); err != nil {
 		return Metadata{}, err
 	}
+	if err := s.prepareFinalizedExecutionDirectory(publication); err != nil {
+		return Metadata{}, err
+	}
 	if err := syncDirectory(publication); err != nil {
 		return Metadata{}, fmt.Errorf("%w: sync publication directory: %v", ErrStaging, err)
 	}
@@ -210,6 +238,44 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 		return Metadata{}, err
 	}
 	return verified, nil
+}
+
+func (s *Store) reconcileFinalizedExecutionCorridor() error {
+	if s.executionGID == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return fmt.Errorf("%w: inspect finalized stages for execution corridor: %v", ErrStaging, err)
+	}
+	for _, entry := range entries {
+		if ValidateVersion(entry.Name()) != nil {
+			continue
+		}
+		finalPath := filepath.Join(s.root, entry.Name())
+		if _, found, verifyErr := s.verifyFinalizedPath(finalPath, entry.Name()); verifyErr != nil || !found {
+			// Do not widen an invalid or incomplete persisted shape. A selected or
+			// requested stage still fails closed through the existing verifier.
+			continue
+		}
+		if err := s.prepareFinalizedExecutionDirectory(finalPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) prepareFinalizedExecutionDirectory(name string) error {
+	if s.executionGID == nil {
+		return nil
+	}
+	if err := os.Chown(name, -1, int(*s.executionGID)); err != nil {
+		return fmt.Errorf("%w: assign finalized execution group: %v", ErrStaging, err)
+	}
+	if err := os.Chmod(name, 0o510); err != nil {
+		return fmt.Errorf("%w: restrict finalized execution directory: %v", ErrStaging, err)
+	}
+	return nil
 }
 
 func (s *Store) cleanupTemporary() error {

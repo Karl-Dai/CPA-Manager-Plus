@@ -114,6 +114,7 @@ seed_stage() {
     source="$2"
     trailer="$3"
     directory="/runtime/supervisor/artifacts/cpa/${version}"
+    cpa_gid="${CPAMP_RUNTIME_CPA_GID:?}"
     mkdir -p "${directory}"
     chmod 700 "${directory}"
     cp "${source}" "${directory}/cli-proxy-api"
@@ -124,6 +125,8 @@ seed_stage() {
     printf "{\"schemaVersion\":1,\"engine\":\"cpa\",\"version\":\"%s\",\"artifactId\":\"sha256:%s\",\"sourceArchiveDigest\":\"sha256:%064d\"}\n" \
       "${version}" "${digest}" 0 >"${directory}/artifact.json"
     chmod 444 "${directory}/artifact.json"
+    chown root:"${cpa_gid}" "${directory}"
+    chmod 510 "${directory}"
     printf "sha256:%s" "${digest}"
   ' sh "${version}" "${source}" "${trailer}"
 }

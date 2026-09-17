@@ -41,6 +41,14 @@ if (
 ) {
   fail('Manager must consume the private Runtime endpoint and narrow token file');
 }
+const runtimeEnvironment = runtime.environment ?? {};
+if (
+  runtimeEnvironment.CPAMP_RUNTIME_CPA_UID !== '10001' ||
+  runtimeEnvironment.CPAMP_RUNTIME_CPA_GID !== '10001'
+) {
+  fail('Runtime must configure the fixed image-owned CPA UID/GID 10001:10001');
+}
+if (runtime.user) fail('Runtime Supervisor must remain the privileged container user');
 
 const volumeTargets = (service) =>
   new Map((service.volumes ?? []).map((volume) => [volume.target, volume]));
@@ -86,5 +94,5 @@ for (const [name, service] of [
 }
 
 console.log(
-  'Runtime 13 Compose validation passed: Manager-owned Runtime wiring, one public 18317 mapping, isolated state, and restricted container privileges'
+  'Runtime 18 Compose validation passed: fixed CPA identity, privileged Supervisor, one public 18317 mapping, and isolated state mounts'
 );

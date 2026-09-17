@@ -38,7 +38,10 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 --system cpamp-cpa \
+    && useradd --uid 10001 --gid 10001 --system --no-create-home \
+      --home-dir /runtime/gateway --shell /usr/sbin/nologin cpamp-cpa
 COPY --from=supervisor-build /out/cpamp-runtime-supervisor /usr/local/bin/cpamp-runtime-supervisor
 COPY --from=cpa-download /out/cli-proxy-api /usr/local/bin/cli-proxy-api
 COPY --from=cpa-download /out/cpa-artifact.json /usr/local/share/cpamp/runtime/cpa-artifact.json
@@ -49,6 +52,8 @@ ENV CPAMP_RUNTIME_ADDR=0.0.0.0:9081 \
     CPAMP_RUNTIME_IDENTITY=embedded-default \
     CPAMP_RUNTIME_JOURNAL_PATH=/runtime/supervisor/operations.sqlite \
     CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317 \
+    CPAMP_RUNTIME_CPA_UID=10001 \
+    CPAMP_RUNTIME_CPA_GID=10001 \
     CPAMP_CPA_EXECUTABLE=/usr/local/bin/cli-proxy-api \
     CPAMP_CPA_ARTIFACT_MANIFEST=/usr/local/share/cpamp/runtime/cpa-artifact.json
 
