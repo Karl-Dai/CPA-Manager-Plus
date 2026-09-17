@@ -100,6 +100,39 @@ func TestRuntimePrepareUpdateRequestValidate(t *testing.T) {
 	}
 }
 
+func TestRuntimeActivateUpdateRequestValidate(t *testing.T) {
+	valid := RuntimeActivateUpdateRequest{
+		RuntimeMutationRequest: RuntimeMutationRequest{
+			OperationID: "activate-1", ExpectedRuntimeIdentity: "runtime-01", ExpectedRuntimeGeneration: 7,
+		},
+		ExpectedActiveArtifactID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetVersion:            "7.4.0-rc.1",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid request: %v", err)
+	}
+	for name, mutate := range map[string]func(*RuntimeActivateUpdateRequest){
+		"missing operation": func(request *RuntimeActivateUpdateRequest) { request.OperationID = "" },
+		"invalid artifact":  func(request *RuntimeActivateUpdateRequest) { request.ExpectedActiveArtifactID = "sha256:ABC" },
+		"latest":            func(request *RuntimeActivateUpdateRequest) { request.TargetVersion = "latest" },
+		"tag alias":         func(request *RuntimeActivateUpdateRequest) { request.TargetVersion = "v7.3.4" },
+		"URL":               func(request *RuntimeActivateUpdateRequest) { request.TargetVersion = "https://example.test/7.3.4" },
+		"path":              func(request *RuntimeActivateUpdateRequest) { request.TargetVersion = "../7.3.4" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := valid
+			mutate(&request)
+			if err := request.Validate(); err == nil {
+				t.Fatal("Validate() error = nil")
+			}
+		})
+	}
+	if !RuntimeOperationActivateUpdate.IsValid() ||
+		!(RuntimeCapabilities{RuntimeCapabilityActivateUpdate}).Supports(RuntimeCapabilityActivateUpdate) {
+		t.Fatal("activate-update operation/capability is not recognized")
+	}
+}
+
 func TestRuntimeObservedStatusValidate(t *testing.T) {
 	activeArtifact := &ActiveGatewayArtifact{
 		Engine:     "cpa",

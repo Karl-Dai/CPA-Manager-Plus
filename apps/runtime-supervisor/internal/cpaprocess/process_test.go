@@ -87,9 +87,17 @@ func TestInvalidStartSpec(t *testing.T) {
 	}
 }
 
+func TestPreSpawnValidationFailurePerformsNoOSSpawnOrOwnershipPublication(t *testing.T) {
+	manager := NewManager(func(StartSpec) error { return errors.New("staged bytes changed") })
+	observation, err := manager.Start(t.Context(), StartSpec{Executable: "unused-test-command"})
+	if !errors.Is(err, ErrSpawnFailed) || observation.State != StateNotStarted || manager.Observe().State != StateNotStarted {
+		t.Fatalf("Start() = %+v, %v; observed=%+v", observation, err, manager.Observe())
+	}
+}
+
 func TestBeforeSpawnRunsOnlyAtEligibleSpawnBoundary(t *testing.T) {
 	var observations int
-	manager := NewManager(func() { observations++ })
+	manager := NewManager(func(StartSpec) error { observations++; return nil })
 	if _, err := manager.Start(t.Context(), StartSpec{}); !errors.Is(err, ErrInvalidSpec) {
 		t.Fatalf("invalid Start() error = %v", err)
 	}

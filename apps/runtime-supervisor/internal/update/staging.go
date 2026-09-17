@@ -30,8 +30,9 @@ const (
 )
 
 var (
-	ErrStaging       = errors.New("artifact staging failed")
-	ErrStageConflict = errors.New("finalized staged artifact conflicts with official source or exact bytes")
+	ErrStaging          = errors.New("artifact staging failed")
+	ErrStageUnavailable = errors.New("finalized staged artifact is unavailable")
+	ErrStageConflict    = errors.New("finalized staged artifact conflicts with official source or exact bytes")
 )
 
 // Metadata is CPAMP-owned authority for one finalized inactive CPA artifact.
@@ -41,6 +42,14 @@ type Metadata struct {
 	Version             string      `json:"version"`
 	ArtifactID          artifact.ID `json:"artifactId"`
 	SourceArchiveDigest string      `json:"sourceArchiveDigest"`
+}
+
+// FinalizedArtifact contains Supervisor-private execution facts for one
+// immutable stage. Paths never cross the Runtime Protocol boundary.
+type FinalizedArtifact struct {
+	Metadata       Metadata
+	ExecutablePath string
+	MetadataPath   string
 }
 
 func (m Metadata) validate() error {
@@ -71,6 +80,19 @@ func NewPreparer(root string) (*Preparer, error) {
 
 func newPreparer(source *Source, store *Store) *Preparer {
 	return &Preparer{source: source, store: store}
+}
+
+// NewPreparerWithStore shares one validated stage store with activation and
+// selection ownership while retaining the fixed official release source.
+func NewPreparerWithStore(store *Store) (*Preparer, error) {
+	if store == nil {
+		return nil, fmt.Errorf("%w: staging store is unavailable", ErrStaging)
+	}
+	source, err := NewSource()
+	if err != nil {
+		return nil, err
+	}
+	return &Preparer{source: source, store: store}, nil
 }
 
 func (p *Preparer) Resolve(ctx context.Context, version string) (Release, error) {
@@ -206,7 +228,39 @@ func (s *Store) cleanupTemporary() error {
 	return nil
 }
 
+// ResolveFinalized re-reads and re-hashes one exact local finalized stage.
+// It performs no release lookup or other network access.
+func (s *Store) ResolveFinalized(version string) (FinalizedArtifact, error) {
+	if s == nil || ValidateVersion(version) != nil {
+		return FinalizedArtifact{}, fmt.Errorf("%w: invalid target version", ErrStageUnavailable)
+	}
+	finalPath := filepath.Join(s.root, version)
+	metadata, found, err := s.verifyFinalizedPath(finalPath, version)
+	if err != nil {
+		return FinalizedArtifact{}, err
+	}
+	if !found {
+		return FinalizedArtifact{}, fmt.Errorf("%w: version %s", ErrStageUnavailable, version)
+	}
+	return FinalizedArtifact{
+		Metadata:       metadata,
+		ExecutablePath: filepath.Join(finalPath, stagedExecutableName),
+		MetadataPath:   filepath.Join(finalPath, stagedMetadataName),
+	}, nil
+}
+
 func (s *Store) verifyFinal(finalPath string, release Release) (Metadata, bool, error) {
+	metadata, found, err := s.verifyFinalizedPath(finalPath, release.Version)
+	if err != nil || !found {
+		return metadata, found, err
+	}
+	if metadata.SourceArchiveDigest != release.ArchiveDigest {
+		return Metadata{}, true, fmt.Errorf("%w: finalized metadata differs", ErrStageConflict)
+	}
+	return metadata, true, nil
+}
+
+func (s *Store) verifyFinalizedPath(finalPath, version string) (Metadata, bool, error) {
 	info, err := os.Lstat(finalPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return Metadata{}, false, nil
@@ -215,7 +269,7 @@ func (s *Store) verifyFinal(finalPath string, release Release) (Metadata, bool, 
 		return Metadata{}, true, fmt.Errorf("%w: finalized stage is not a directory", ErrStageConflict)
 	}
 	metadata, err := readMetadata(filepath.Join(finalPath, stagedMetadataName))
-	if err != nil || metadata.Version != release.Version || metadata.SourceArchiveDigest != release.ArchiveDigest {
+	if err != nil || metadata.Version != version {
 		return Metadata{}, true, fmt.Errorf("%w: finalized metadata differs", ErrStageConflict)
 	}
 	executablePath := filepath.Join(finalPath, stagedExecutableName)

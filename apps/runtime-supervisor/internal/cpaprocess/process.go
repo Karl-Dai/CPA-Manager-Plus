@@ -69,7 +69,7 @@ const exitEventBuffer = 1
 // Its zero value is ready to use; it must not be copied after first use.
 type Manager struct {
 	mu           sync.Mutex
-	beforeSpawn  func()
+	beforeSpawn  func(StartSpec) error
 	cmd          *exec.Cmd
 	waitDone     chan struct{}
 	stopTarget   *exec.Cmd
@@ -84,7 +84,7 @@ type Manager struct {
 // immediately before the configured executable is handed to the OS. It lets
 // the Supervisor refresh cached executable facts without making status polling
 // or rejected duplicate Start calls touch the filesystem.
-func NewManager(beforeSpawn func()) *Manager {
+func NewManager(beforeSpawn func(StartSpec) error) *Manager {
 	return &Manager{beforeSpawn: beforeSpawn}
 }
 
@@ -135,7 +135,9 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 		return m.observeLocked(), err
 	}
 	if m.beforeSpawn != nil {
-		m.beforeSpawn()
+		if err := m.beforeSpawn(spec); err != nil {
+			return m.observeLocked(), fmt.Errorf("%w: pre-spawn validation: %v", ErrSpawnFailed, err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return m.observeLocked(), err

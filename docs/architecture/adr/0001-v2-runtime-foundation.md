@@ -444,6 +444,40 @@ terminal evidence is persisted. Ordinary Runtime requests keep their short
 transport deadlines; `prepare-update` uses a bounded budget ordered as
 operation execution, Supervisor response/write, then Manager request.
 
+The active CPA selection is Supervisor-private persistent Runtime state,
+logically `/runtime/supervisor/active/cpa/selection.json`. Selection absence
+means the trusted executable and artifact manifest bundled in the Runtime
+image. Selection presence may identify only one locally revalidated finalized
+Runtime stage by canonical engine, version, and exact executable artifact ID;
+it never persists a caller path, URL, command, or rollback target. Supervisor
+startup resolves a present selection through finalized stage metadata and
+exact executable bytes. A corrupt, missing, or mismatched selected stage fails
+closed instead of falling back to the bundled image artifact. Ordinary Start,
+Restart, and automatic recovery consume this committed selection, so it
+survives Runtime container recreation without overwriting the image binary.
+
+The private typed `activate_update` operation enforces Runtime identity,
+generation, and a freshly observed `expectedActiveArtifactId`, then revalidates
+one exact finalized local target stage without release discovery, download, or
+other network access. Activation owns the shared lifecycle serialization gate.
+After durable intent and running evidence, it terminates the exact owned A
+child, spawns B only as an in-memory candidate, and requires exact-instance
+loopback readiness plus a post-readiness revalidation of B's exact bytes.
+Persistent selection remains A throughout that candidate window.
+
+Atomic persistent selection publication after readiness is the activation
+point of no return. A failure proven to occur before publication stops/reaps B
+when safely owned, freshly revalidates and restarts exact A, waits for A's
+private exact-instance readiness, persists terminal failure evidence, and only
+then arms a fresh A recovery epoch. Successful B publication is followed by
+terminal success evidence and only then a fresh B recovery epoch. Publication
+or terminal durability ambiguity enters manual-intervention semantics; after B
+is durably selected, Supervisor does not blindly roll the process back to A and
+create selection/process split-brain. Candidate B never owns Runtime11
+automatic recovery authority before selection commit, and activation does not
+change Runtime generation or resume as a workflow across Supervisor
+generations.
+
 ## Phase 1 implementation boundary
 
 Phase 1 MUST establish:

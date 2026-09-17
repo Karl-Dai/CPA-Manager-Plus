@@ -23,10 +23,12 @@ const (
 	defaultRuntimeAddr = "127.0.0.1:18318"
 	defaultCPAAddr     = "127.0.0.1:8317"
 	shutdownTimeout    = 10 * time.Second
-	// The ordinary Server WriteTimeout remains short. Only the typed prepare
-	// update route receives this longer, still-bounded response budget.
-	prepareUpdateResponseTimeout = 12 * time.Minute
-	prepareUpdateResponsePath    = "/v1/runtime/operations/prepare-update"
+	// The ordinary Server WriteTimeout remains short. The two long-running
+	// typed update routes receive distinct, still-bounded response budgets.
+	prepareUpdateResponseTimeout  = 12 * time.Minute
+	prepareUpdateResponsePath     = "/v1/runtime/operations/prepare-update"
+	activateUpdateResponseTimeout = 150 * time.Second
+	activateUpdateResponsePath    = "/v1/runtime/operations/activate-update"
 )
 
 type config struct {
@@ -183,16 +185,22 @@ func newHTTPServer(handler http.Handler) *http.Server {
 
 func withPrepareUpdateResponseBudget(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != prepareUpdateResponsePath {
+		if r.Method != http.MethodPost || (r.URL.Path != prepareUpdateResponsePath && r.URL.Path != activateUpdateResponsePath) {
 			next.ServeHTTP(w, r)
 			return
 		}
+		responseTimeout := prepareUpdateResponseTimeout
+		operationName := "prepare-update"
+		if r.URL.Path == activateUpdateResponsePath {
+			responseTimeout = activateUpdateResponseTimeout
+			operationName = "activate-update"
+		}
 		controller := http.NewResponseController(w)
-		if err := controller.SetWriteDeadline(time.Now().Add(prepareUpdateResponseTimeout)); err != nil {
+		if err := controller.SetWriteDeadline(time.Now().Add(responseTimeout)); err != nil {
 			// A real net/http server supports this controller. Fail closed when a
 			// custom writer cannot provide the route-specific deadline instead of
 			// silently disabling the bounded prepare contract.
-			http.Error(w, "prepare-update response deadline unavailable", http.StatusInternalServerError)
+			http.Error(w, operationName+" response deadline unavailable", http.StatusInternalServerError)
 			return
 		}
 		defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()

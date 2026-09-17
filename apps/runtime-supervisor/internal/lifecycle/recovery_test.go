@@ -13,6 +13,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 )
 
 func TestRecoveryLeaseStartsInactiveAndExplicitStartArmsOnce(t *testing.T) {
@@ -66,6 +67,23 @@ func TestConfirmedUnexpectedExitUsesDurablePrivateOperationBeforeSpawn(t *testin
 	time.Sleep(20 * time.Millisecond)
 	if f.process.startCount() != 2 {
 		t.Fatalf("stale exact-child exit spawned another child: %d", f.process.startCount())
+	}
+}
+
+func TestAutomaticRecoveryUsesCommittedSelectedExecutable(t *testing.T) {
+	f := newRecoveryFixture(t)
+	f.executor.active = selection.Descriptor{
+		Source: selection.SourceFinalized, Version: "7.3.4", ArtifactID: activeArtifactB,
+		ExecutablePath: activationPathB, MetadataPath: "/runtime/stage/artifact.json",
+	}
+	startRecoveryEpoch(t, f, "start-selected-b")
+	f.process.exitCurrent(cpaprocess.StateExited, true)
+	waitRecoveryCondition(t, func() bool { return f.process.startCount() == 2 })
+	f.process.mu.Lock()
+	specs := append([]cpaprocess.StartSpec(nil), f.process.specs...)
+	f.process.mu.Unlock()
+	if len(specs) != 2 || specs[0].Executable != activationPathB || specs[1].Executable != activationPathB {
+		t.Fatalf("selected recovery specs = %+v", specs)
 	}
 }
 
@@ -856,6 +874,7 @@ type recoveryProcess struct {
 	starts   int
 	stops    int
 	reserved uint64
+	specs    []cpaprocess.StartSpec
 	events   chan cpaprocess.ExitEvent
 
 	startFailures []error
@@ -890,12 +909,13 @@ func (p *recoveryProcess) setObservation(observation cpaprocess.Observation) {
 	p.mu.Unlock()
 }
 
-func (p *recoveryProcess) Start(ctx context.Context, _ cpaprocess.StartSpec) (cpaprocess.Observation, error) {
+func (p *recoveryProcess) Start(ctx context.Context, spec cpaprocess.StartSpec) (cpaprocess.Observation, error) {
 	if err := ctx.Err(); err != nil {
 		return p.current(), err
 	}
 	p.mu.Lock()
 	p.starts++
+	p.specs = append(p.specs, spec)
 	call := p.starts
 	var startErr error
 	if len(p.startFailures) > 0 {

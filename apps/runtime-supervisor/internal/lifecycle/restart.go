@@ -57,6 +57,9 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 		// particular, it cannot terminate a replacement child or spawn again.
 		return operation, nil
 	}
+	if e.activeSelectionAmbiguous {
+		return journal.Operation{}, journal.ErrOperationStateConflict
+	}
 	target, err := e.process.PrepareStop()
 	if err != nil {
 		if errors.Is(err, cpaprocess.ErrStateConflict) {
@@ -95,7 +98,7 @@ func (e *Executor) Restart(ctx context.Context, request RestartRequest) (journal
 	// confirmed reap. Release is idempotent and makes that requirement explicit
 	// for alternative process implementations before replacement Start.
 	target.Release()
-	started, err := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.executable})
+	started, err := e.process.Start(executionCtx, cpaprocess.StartSpec{Executable: e.currentExecutableLocked()})
 	if err != nil {
 		return e.completeRestartFailure(executionCtx, operation, intent.OperationID, "process_restart_start_failed", err)
 	}

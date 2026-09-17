@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
@@ -26,9 +27,132 @@ const startHelperName = "cpamp-start-test-child.exe"
 func expectedRuntimeCapabilities() []string {
 	capabilities := []string{"start", "stop", "restart"}
 	if runtimeupdate.SupportedPlatform(runtime.GOOS, runtime.GOARCH) {
-		capabilities = append(capabilities, "prepare_update")
+		capabilities = append(capabilities, "prepare_update", "activate_update")
 	}
 	return capabilities
+}
+
+func TestPersistedSelectionDrivesStartupAndContainerGenerationRecreation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executable fixture is a Unix shell script")
+	}
+	directory := t.TempDir()
+	bundled := filepath.Join(directory, "bundled-cpa")
+	spawnLog := filepath.Join(directory, "selection-spawns")
+	bundledBytes := writeArtifactGateway(t, bundled, spawnLog, "A")
+	bundledID := exactArtifactID(bundledBytes)
+	bundledManifest := filepath.Join(directory, "bundled-artifact.json")
+	if err := os.WriteFile(bundledManifest, []byte(fmt.Sprintf(
+		`{"schemaVersion":1,"engine":"cpa","version":"7.3.3","artifactId":%q}`, bundledID,
+	)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	supervisorRoot := filepath.Join(directory, "supervisor")
+	stageRoot := filepath.Join(supervisorRoot, "artifacts", "cpa")
+	stageDirectory := filepath.Join(stageRoot, "7.3.4")
+	if err := os.MkdirAll(stageDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stagedExecutable := filepath.Join(stageDirectory, "cli-proxy-api")
+	stagedBytes := writeArtifactGateway(t, stagedExecutable, spawnLog, "B")
+	if err := os.Chmod(stagedExecutable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stagedID := exactArtifactID(stagedBytes)
+	stagedMetadata := filepath.Join(stageDirectory, "artifact.json")
+	if err := os.WriteFile(stagedMetadata, []byte(fmt.Sprintf(
+		`{"schemaVersion":1,"engine":"cpa","version":"7.3.4","artifactId":%q,"sourceArchiveDigest":"sha256:%s"}`,
+		stagedID, strings.Repeat("c", 64),
+	)), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	stages, err := runtimeupdate.NewStore(stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selections, err := selection.NewStore(filepath.Join(supervisorRoot, "active", "cpa"), stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := selections.ResolveFinalized("7.3.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := selections.Commit(candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadTestConfig(t, fixedGeneration(41))
+	cfg.journalPath = filepath.Join(supervisorRoot, "operations.sqlite")
+	cfg.cpaExecutable = bundled
+	cfg.cpaArtifactManifest = bundledManifest
+	cfg.cpaAddr = unreadyCPAAddr(t)
+	first, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := requestRuntime(t, first, "/v1/runtime/status")
+	if status.ActiveGatewayArtifact == nil || status.ActiveGatewayArtifact.ArtifactID != stagedID ||
+		status.ActiveGatewayArtifact.Version != "7.3.4" || status.RuntimeGeneration != 41 {
+		t.Fatalf("selected startup status = %+v", status)
+	}
+	if started := runtimeStart(first, t.Context(), "start-b-1", 41); started.Code != http.StatusOK {
+		t.Fatalf("Start selected B = %d, %s", started.Code, started.Body.String())
+	}
+	awaitArtifactGatewaySpawns(t, spawnLog, 1)
+	if stopped := runtimeStop(first, t.Context(), "stop-b-1", 41); stopped.Code != http.StatusOK {
+		t.Fatalf("Stop selected B = %d, %s", stopped.Code, stopped.Body.String())
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.runtimeGeneration = 42
+	second, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = second.Close()
+		killArtifactGateways(spawnLog)
+	})
+	status = requestRuntime(t, second, "/v1/runtime/status")
+	if status.ActiveGatewayArtifact == nil || status.ActiveGatewayArtifact.ArtifactID != stagedID || status.RuntimeGeneration != 42 {
+		t.Fatalf("recreated selected status = %+v", status)
+	}
+	if started := runtimeStart(second, t.Context(), "start-b-2", 42); started.Code != http.StatusOK {
+		t.Fatalf("Start recreated B = %d, %s", started.Code, started.Body.String())
+	}
+	awaitArtifactGatewaySpawns(t, spawnLog, 2)
+}
+
+func TestPersistedSelectionCorruptionFailsStartupWithoutBundledFallback(t *testing.T) {
+	directory := t.TempDir()
+	bundled := filepath.Join(directory, "bundled-cpa")
+	if err := os.WriteFile(bundled, []byte("bundled"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	supervisorRoot := filepath.Join(directory, "supervisor")
+	selectionRoot := filepath.Join(supervisorRoot, "active", "cpa")
+	if err := os.MkdirAll(selectionRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	selectionJSON := fmt.Sprintf(
+		`{"schemaVersion":1,"engine":"cpa","version":"7.3.4","artifactId":"sha256:%s"}`,
+		strings.Repeat("a", 64),
+	)
+	if err := os.WriteFile(filepath.Join(selectionRoot, "selection.json"), []byte(selectionJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadTestConfig(t, fixedGeneration(41))
+	cfg.journalPath = filepath.Join(supervisorRoot, "operations.sqlite")
+	cfg.cpaExecutable = bundled
+	cfg.cpaAddr = unreadyCPAAddr(t)
+	handler, err := newRuntimeHandler(t.Context(), cfg)
+	if err == nil || handler != nil || !strings.Contains(err.Error(), "resolve active selection") {
+		t.Fatalf("newRuntimeHandler() = %v, %v", handler, err)
+	}
 }
 
 func TestActiveArtifactObservationIsCachedAndOrthogonalToRuntimeGeneration(t *testing.T) {

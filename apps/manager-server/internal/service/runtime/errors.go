@@ -21,6 +21,8 @@ const (
 	ProtocolErrorActiveArtifactMismatch          ProtocolErrorCode = "active_artifact_mismatch"
 	ProtocolErrorUnsupportedStagingPlatform      ProtocolErrorCode = "unsupported_staging_platform"
 	ProtocolErrorReleaseMetadataInvalid          ProtocolErrorCode = "release_metadata_invalid"
+	ProtocolErrorTargetStageUnavailable          ProtocolErrorCode = "target_stage_unavailable"
+	ProtocolErrorTargetStageCorrupt              ProtocolErrorCode = "target_stage_corrupt"
 	ProtocolErrorInternal                        ProtocolErrorCode = "internal_error"
 )
 

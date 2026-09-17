@@ -67,10 +67,11 @@ func (o Observation) Validate() error {
 }
 
 type manifest struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Engine        string `json:"engine"`
-	Version       string `json:"version"`
-	ArtifactID    ID     `json:"artifactId"`
+	SchemaVersion       int    `json:"schemaVersion"`
+	Engine              string `json:"engine"`
+	Version             string `json:"version"`
+	ArtifactID          ID     `json:"artifactId"`
+	SourceArchiveDigest string `json:"sourceArchiveDigest,omitempty"`
 }
 
 type fileOpener func(string) (io.ReadCloser, error)
@@ -118,7 +119,14 @@ func newObserver(executablePath, manifestPath string, openFile fileOpener, readF
 // Refresh recomputes identity from the exact configured executable bytes.
 // Manifest failures preserve the exact digest while withholding Version.
 func (o *Observer) Refresh() error {
-	observed, err := o.observe()
+	return o.RefreshFrom(o.executablePath, o.manifestPath)
+}
+
+// RefreshFrom recomputes truth for the exact executable selected for one
+// spawn. The caller owns path policy; this observer only hashes bytes and
+// binds optional CPAMP-owned metadata to that digest.
+func (o *Observer) RefreshFrom(executablePath, manifestPath string) error {
+	observed, err := o.observe(executablePath, manifestPath)
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.lastError = err
@@ -148,8 +156,8 @@ func (o *Observer) LastError() error {
 	return o.lastError
 }
 
-func (o *Observer) observe() (Observation, error) {
-	file, err := o.openFile(o.executablePath)
+func (o *Observer) observe(executablePath, manifestPath string) (Observation, error) {
+	file, err := o.openFile(executablePath)
 	if err != nil {
 		return Observation{}, fmt.Errorf("%w: open executable: %v", ErrExecutableUnavailable, err)
 	}
@@ -164,7 +172,7 @@ func (o *Observer) observe() (Observation, error) {
 		ArtifactID: ID(artifactIDPrefix + hex.EncodeToString(hasher.Sum(nil))),
 	}
 
-	trusted, err := o.loadManifest()
+	trusted, err := o.loadManifest(manifestPath)
 	if err != nil {
 		return observed, err
 	}
@@ -175,11 +183,11 @@ func (o *Observer) observe() (Observation, error) {
 	return observed, nil
 }
 
-func (o *Observer) loadManifest() (manifest, error) {
-	if strings.TrimSpace(o.manifestPath) == "" {
+func (o *Observer) loadManifest(manifestPath string) (manifest, error) {
+	if strings.TrimSpace(manifestPath) == "" {
 		return manifest{}, ErrManifestUnavailable
 	}
-	encoded, err := o.readFile(o.manifestPath)
+	encoded, err := o.readFile(manifestPath)
 	if err != nil {
 		return manifest{}, fmt.Errorf("%w: read manifest: %v", ErrManifestUnavailable, err)
 	}

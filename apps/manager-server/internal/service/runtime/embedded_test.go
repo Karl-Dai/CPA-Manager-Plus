@@ -33,9 +33,9 @@ func TestNewEmbeddedClientDisablesEnvironmentProxy(t *testing.T) {
 	}
 }
 
-func TestEmbeddedClientUsesDedicatedPrepareUpdateTimeout(t *testing.T) {
+func TestEmbeddedClientUsesDedicatedUpdateTimeouts(t *testing.T) {
 	client := NewEmbeddedClient("http://cpamp-runtime:18318", testRuntimeToken)
-	if client.httpClient == nil || client.prepareHTTPClient == nil {
+	if client.httpClient == nil || client.prepareHTTPClient == nil || client.activateHTTPClient == nil {
 		t.Fatal("embedded Runtime clients are not configured")
 	}
 	if client.httpClient.Timeout != embeddedRuntimeRequestTimeout {
@@ -48,6 +48,12 @@ func TestEmbeddedClientUsesDedicatedPrepareUpdateTimeout(t *testing.T) {
 		client.prepareHTTPClient.Timeout <= 12*time.Minute ||
 		client.prepareHTTPClient.Timeout <= 5*time.Minute {
 		t.Fatalf("prepare-update timeout = %s is not a bounded budget above ordinary/12m/release limits", client.prepareHTTPClient.Timeout)
+	}
+	if client.activateHTTPClient.Timeout != embeddedRuntimeActivateUpdateTimeout ||
+		client.activateHTTPClient.Timeout <= client.httpClient.Timeout ||
+		client.activateHTTPClient.Timeout <= 150*time.Second ||
+		client.activateHTTPClient.Timeout >= client.prepareHTTPClient.Timeout {
+		t.Fatalf("activate-update timeout = %s is not between Supervisor response and prepare budgets", client.activateHTTPClient.Timeout)
 	}
 }
 
@@ -372,16 +378,50 @@ func TestEmbeddedClientSubmitsTypedPrepareUpdate(t *testing.T) {
 	}
 }
 
-func TestEmbeddedClientAcceptsAdditiveRuntime16AndFutureCapabilities(t *testing.T) {
+func TestEmbeddedClientSubmitsTypedActivateUpdate(t *testing.T) {
+	request := model.RuntimeActivateUpdateRequest{
+		RuntimeMutationRequest: model.RuntimeMutationRequest{
+			OperationID: "activate-1", ExpectedRuntimeIdentity: "runtime-01", ExpectedRuntimeGeneration: 7,
+		},
+		ExpectedActiveArtifactID: testArtifactID,
+		TargetVersion:            "7.3.4",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, httpRequest *http.Request) {
+		if httpRequest.Method != http.MethodPost || httpRequest.URL.Path != embeddedRuntimeActivateUpdatePath {
+			t.Errorf("request = %s %s", httpRequest.Method, httpRequest.URL.Path)
+		}
+		var body embeddedActivateUpdateRequest
+		if err := json.NewDecoder(httpRequest.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if body.OperationID != request.OperationID || body.ExpectedRuntimeIdentity != "runtime-01" ||
+			body.ExpectedRuntimeGeneration != 7 || body.ExpectedActiveArtifactID != string(request.ExpectedActiveArtifactID) ||
+			body.TargetVersion != request.TargetVersion {
+			t.Errorf("request body = %#v", body)
+		}
+		_ = json.NewEncoder(w).Encode(embeddedOperationResponse{
+			OperationID: request.OperationID, OperationType: string(model.RuntimeOperationActivateUpdate),
+			RuntimeIdentity: "runtime-01", RuntimeGeneration: 7, State: string(model.RuntimeOperationSucceeded),
+		})
+	}))
+	defer server.Close()
+	result, err := NewEmbeddedClient(server.URL, testRuntimeToken).ActivateUpdate(t.Context(), request)
+	if err != nil || result.OperationType != model.RuntimeOperationActivateUpdate || result.State != model.RuntimeOperationSucceeded {
+		t.Fatalf("ActivateUpdate() = %#v, %v", result, err)
+	}
+}
+
+func TestEmbeddedClientAcceptsAdditiveRuntime17AndFutureCapabilities(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"offline","capabilities":["start","prepare_update","future-capability"],"recovery":{"state":"inactive","attemptsRemaining":0}}`))
+		_, _ = w.Write([]byte(`{"protocolVersion":"v1","runtimeIdentity":"runtime-01","runtimeGeneration":7,"state":"offline","capabilities":["start","prepare_update","activate_update","future-capability"],"recovery":{"state":"inactive","attemptsRemaining":0}}`))
 	}))
 	defer server.Close()
 	status, err := NewEmbeddedClient(server.URL, testRuntimeToken).Status(t.Context())
 	if err != nil {
 		t.Fatalf("Status() error = %v", err)
 	}
-	if !status.Capabilities.Supports(model.RuntimeCapabilityPrepareUpdate) || !status.Capabilities.Supports("future-capability") {
+	if !status.Capabilities.Supports(model.RuntimeCapabilityPrepareUpdate) ||
+		!status.Capabilities.Supports(model.RuntimeCapabilityActivateUpdate) || !status.Capabilities.Supports("future-capability") {
 		t.Fatalf("capabilities = %#v", status.Capabilities)
 	}
 }
