@@ -20,6 +20,8 @@ func TestExecutionGroupCorridorIsIdempotentAndLeavesInvalidStagePrivate(t *testi
 	}
 	archive := tarGzip(t, archiveEntry{name: stagedExecutableName, typeFlag: tar.TypeReg, data: []byte("binary")})
 	release := releaseForArchive("7.3.3", archive)
+	final := filepath.Join(root, release.Version)
+	t.Cleanup(func() { _ = os.Chmod(final, 0o700) })
 	store, err := NewStoreWithExecutionGroup(root, uint32(os.Getgid()))
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +42,6 @@ func TestExecutionGroupCorridorIsIdempotentAndLeavesInvalidStagePrivate(t *testi
 		}
 	}
 	assertMode(t, root, 0o710)
-	final := filepath.Join(root, release.Version)
 	assertMode(t, final, 0o510)
 	assertMode(t, private, 0o700)
 	info, err := os.Stat(final)

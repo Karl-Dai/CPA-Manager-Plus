@@ -170,7 +170,7 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 		return Metadata{}, fmt.Errorf("%w: invalid stage request", ErrStaging)
 	}
 	finalPath := filepath.Join(s.root, release.Version)
-	if metadata, found, err := s.verifyFinal(finalPath, release); found || err != nil {
+	if metadata, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
 		return metadata, err
 	}
 	temporary, err := os.MkdirTemp(s.root, temporaryPrefix)
@@ -212,20 +212,20 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 	if err := writeMetadata(filepath.Join(publication, stagedMetadataName), metadata); err != nil {
 		return Metadata{}, err
 	}
-	if err := s.prepareFinalizedExecutionDirectory(publication); err != nil {
-		return Metadata{}, err
-	}
 	if err := syncDirectory(publication); err != nil {
 		return Metadata{}, fmt.Errorf("%w: sync publication directory: %v", ErrStaging, err)
 	}
-	if _, found, err := s.verifyFinal(finalPath, release); found || err != nil {
+	if _, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
 		return Metadata{}, err
 	}
 	if err := os.Rename(publication, finalPath); err != nil {
-		if existing, found, verifyErr := s.verifyFinal(finalPath, release); found || verifyErr != nil {
+		if existing, found, verifyErr := s.verifyPreparedFinal(finalPath, release); found || verifyErr != nil {
 			return existing, verifyErr
 		}
 		return Metadata{}, fmt.Errorf("%w: atomically publish finalized stage: %v", ErrStaging, err)
+	}
+	if err := s.prepareFinalizedExecutionDirectory(finalPath); err != nil {
+		return Metadata{}, err
 	}
 	if err := syncDirectory(s.root); err != nil {
 		return Metadata{}, fmt.Errorf("%w: sync staging root: %v", ErrStaging, err)
@@ -275,6 +275,9 @@ func (s *Store) prepareFinalizedExecutionDirectory(name string) error {
 	if err := os.Chmod(name, 0o510); err != nil {
 		return fmt.Errorf("%w: restrict finalized execution directory: %v", ErrStaging, err)
 	}
+	if err := syncDirectory(name); err != nil {
+		return fmt.Errorf("%w: sync finalized execution directory: %v", ErrStaging, err)
+	}
 	return nil
 }
 
@@ -322,6 +325,17 @@ func (s *Store) verifyFinal(finalPath string, release Release) (Metadata, bool, 
 	}
 	if metadata.SourceArchiveDigest != release.ArchiveDigest {
 		return Metadata{}, true, fmt.Errorf("%w: finalized metadata differs", ErrStageConflict)
+	}
+	return metadata, true, nil
+}
+
+func (s *Store) verifyPreparedFinal(finalPath string, release Release) (Metadata, bool, error) {
+	metadata, found, err := s.verifyFinal(finalPath, release)
+	if err != nil || !found {
+		return metadata, found, err
+	}
+	if err := s.prepareFinalizedExecutionDirectory(finalPath); err != nil {
+		return Metadata{}, true, err
 	}
 	return metadata, true, nil
 }
