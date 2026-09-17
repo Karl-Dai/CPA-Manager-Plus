@@ -33,6 +33,24 @@ func TestNewEmbeddedClientDisablesEnvironmentProxy(t *testing.T) {
 	}
 }
 
+func TestEmbeddedClientUsesDedicatedPrepareUpdateTimeout(t *testing.T) {
+	client := NewEmbeddedClient("http://cpamp-runtime:18318", testRuntimeToken)
+	if client.httpClient == nil || client.prepareHTTPClient == nil {
+		t.Fatal("embedded Runtime clients are not configured")
+	}
+	if client.httpClient.Timeout != embeddedRuntimeRequestTimeout {
+		t.Fatalf("ordinary Runtime timeout = %s, want %s", client.httpClient.Timeout, embeddedRuntimeRequestTimeout)
+	}
+	if client.prepareHTTPClient.Timeout != embeddedRuntimePrepareUpdateTimeout {
+		t.Fatalf("prepare-update timeout = %s, want %s", client.prepareHTTPClient.Timeout, embeddedRuntimePrepareUpdateTimeout)
+	}
+	if client.prepareHTTPClient.Timeout <= client.httpClient.Timeout ||
+		client.prepareHTTPClient.Timeout <= 12*time.Minute ||
+		client.prepareHTTPClient.Timeout <= 5*time.Minute {
+		t.Fatalf("prepare-update timeout = %s is not a bounded budget above ordinary/12m/release limits", client.prepareHTTPClient.Timeout)
+	}
+}
+
 func TestEmbeddedClientStatusMapsSupervisorObservation(t *testing.T) {
 	tests := []struct {
 		name         string

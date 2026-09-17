@@ -313,9 +313,6 @@ func validRuntimeTargetVersion(version string) bool {
 }
 
 func splitRuntimeVersion(value, separator string) (string, string, bool) {
-	if strings.Count(value, separator) > 1 {
-		return "", "", false
-	}
 	left, right, found := strings.Cut(value, separator)
 	if found && (left == "" || right == "") {
 		return "", "", false

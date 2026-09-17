@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
@@ -16,6 +17,18 @@ var (
 	ErrActiveArtifactMismatch    = errors.New("active artifact does not match expected identity")
 	ErrUnsupportedStaging        = errors.New("update staging is unsupported on this platform")
 	ErrReleaseMetadataInvalid    = errors.New("official release metadata is unavailable or invalid")
+)
+
+const (
+	// PrepareUpdateExecutionTimeout bounds the whole prepare execution window,
+	// including one bounded metadata request, one bounded asset request, local
+	// extraction and filesystem publication. The stage context uses the same
+	// absolute deadline after durable running evidence, independent of caller
+	// cancel.
+	PrepareUpdateExecutionTimeout = 11 * time.Minute
+	// PrepareUpdateTerminalPersistenceTimeout is a separate bounded budget for
+	// terminal journal evidence after staging completes or fails.
+	PrepareUpdateTerminalPersistenceTimeout = 15 * time.Second
 )
 
 type activeArtifactRefresher interface {
@@ -66,20 +79,24 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 	if err := request.Validate(); err != nil {
 		return journal.Operation{}, err
 	}
-	if e.closed.Load() {
+	if !e.admitPrepareWorker() {
 		return journal.Operation{}, ErrPersistenceUnavailable
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := ctx.Err(); err != nil {
+	defer e.prepareWorkers.Done()
+
+	// Only prepare operations serialize on this narrow updater gate. The shared
+	// lifecycle gate is acquired around durable admission and fresh fencing, but
+	// is released for release network I/O and staging so recovery can proceed.
+	e.prepareMu.Lock()
+	defer e.prepareMu.Unlock()
+
+	operationDeadline := time.Now().Add(PrepareUpdateExecutionTimeout)
+	preconditionCtx, cancelPreconditions := context.WithDeadline(ctx, operationDeadline)
+	defer cancelPreconditions()
+	if err := preconditionCtx.Err(); err != nil {
 		return journal.Operation{}, err
 	}
-	if e.closed.Load() {
-		return journal.Operation{}, ErrPersistenceUnavailable
-	}
-	if e.artifact == nil || e.updates == nil {
-		return journal.Operation{}, ErrUnsupportedStaging
-	}
+
 	intent := journal.Intent{
 		OperationID:               request.OperationID,
 		OperationType:             "prepare_update",
@@ -89,52 +106,62 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 			"runtime.prepare_update/v1:{targetVersion:" + request.TargetVersion + "}",
 		)),
 	}
-	operation, found, err := e.journal.Resolve(ctx, e.authority, intent)
+
+	// Resolve retained operation IDs before touching the active executable. A
+	// replay therefore remains side-effect free, including across generations.
+	e.mu.Lock()
+	if err := preconditionCtx.Err(); err != nil {
+		e.mu.Unlock()
+		return journal.Operation{}, err
+	}
+	if e.closed.Load() {
+		e.mu.Unlock()
+		return journal.Operation{}, ErrPersistenceUnavailable
+	}
+	observer := e.artifact
+	preparer := e.updates
+	if observer == nil || preparer == nil {
+		e.mu.Unlock()
+		return journal.Operation{}, ErrUnsupportedStaging
+	}
+	operation, found, err := e.journal.Resolve(preconditionCtx, e.authority, intent)
 	if err != nil {
+		e.mu.Unlock()
 		return journal.Operation{}, submissionError(err)
 	}
 	if found {
+		e.mu.Unlock()
 		return operation, nil
 	}
-
-	// Refresh the exact configured executable at the fence. Manifest/version
-	// errors do not invalidate an otherwise exact digest observation.
-	refreshErr := e.artifact.Refresh()
-	active := e.artifact.Observation()
-	if errors.Is(refreshErr, artifact.ErrExecutableUnavailable) || active == nil || !active.ArtifactID.IsValid() {
-		return journal.Operation{}, ErrActiveArtifactUnavailable
+	if err := refreshExpectedActiveArtifact(observer, request.ExpectedActiveArtifactID); err != nil {
+		e.mu.Unlock()
+		return journal.Operation{}, err
 	}
-	if active.ArtifactID != request.ExpectedActiveArtifactID {
-		return journal.Operation{}, ErrActiveArtifactMismatch
+	e.mu.Unlock()
+	if e.closed.Load() {
+		return journal.Operation{}, ErrPersistenceUnavailable
 	}
 
-	// Exact official release and supported-asset preconditions precede durable
-	// intent. Archive download and all staging bytes happen only after running.
-	release, err := e.updates.Resolve(ctx, request.TargetVersion)
+	// Release metadata lookup is privileged Supervisor I/O, but it must not
+	// hold the shared lifecycle/recovery gate.
+	release, err := preparer.Resolve(preconditionCtx, request.TargetVersion)
 	if err != nil {
-		switch {
-		case errors.Is(err, runtimeupdate.ErrUnsupportedPlatform):
-			return journal.Operation{}, ErrUnsupportedStaging
-		case errors.Is(err, runtimeupdate.ErrInvalidTargetVersion):
-			return journal.Operation{}, ErrInvalidRequest
-		default:
-			return journal.Operation{}, fmt.Errorf("%w: %v", ErrReleaseMetadataInvalid, err)
-		}
-	}
-	operation, created, err := e.journal.Begin(ctx, e.authority, intent)
-	if err != nil {
-		return journal.Operation{}, submissionError(err)
-	}
-	if !created {
-		return operation, nil
+		return journal.Operation{}, mapPrepareResolveError(err)
 	}
 
-	executionCtx := context.Background()
-	operation, err = e.journal.MarkRunning(executionCtx, e.authority.RuntimeIdentity, intent.OperationID)
-	if err != nil {
-		return journal.Operation{}, fmt.Errorf("%w: %w", ErrPersistenceUnavailable, err)
+	// Re-enter an admission barrier before Begin. CloseAdmission either wins
+	// here (so no durable intent is created) or waits until Begin/MarkRunning has
+	// committed; in both cases journal draining is race-free.
+	operation, execute, err := e.beginPrepareExecution(preconditionCtx, intent, observer, request.ExpectedActiveArtifactID)
+	if err != nil || !execute {
+		return operation, err
 	}
-	_, stageErr := e.updates.Stage(executionCtx, release)
+
+	// Durable running evidence transfers execution to the Supervisor. The
+	// caller's request context no longer controls staging or terminal evidence.
+	stageCtx, cancelStage := context.WithDeadline(context.Background(), operationDeadline)
+	_, stageErr := preparer.Stage(stageCtx, release)
+	cancelStage()
 	state, failureCode := journal.StateSucceeded, ""
 	if stageErr != nil {
 		state, failureCode = journal.StateFailed, "staging_failed"
@@ -142,9 +169,94 @@ func (e *Executor) PrepareUpdate(ctx context.Context, request PrepareUpdateReque
 			failureCode = "release_asset_invalid"
 		}
 	}
-	result, err := e.journal.Complete(executionCtx, e.authority.RuntimeIdentity, intent.OperationID, state, failureCode)
+	completeCtx, cancelComplete := context.WithTimeout(context.Background(), PrepareUpdateTerminalPersistenceTimeout)
+	result, err := e.journal.Complete(completeCtx, e.authority.RuntimeIdentity, intent.OperationID, state, failureCode)
+	cancelComplete()
 	if err != nil {
 		return operation, fmt.Errorf("%w: record prepare-update result: %w", ErrExecutionFailed, err)
 	}
 	return result, nil
+}
+
+func (e *Executor) admitPrepareWorker() bool {
+	e.prepareAdmissionMu.Lock()
+	defer e.prepareAdmissionMu.Unlock()
+	if e.closed.Load() {
+		return false
+	}
+	e.prepareWorkers.Add(1)
+	return true
+}
+
+func refreshExpectedActiveArtifact(observer activeArtifactRefresher, expected artifact.ID) error {
+	// Manifest/version errors do not invalidate an otherwise exact executable
+	// digest observation. An unavailable executable or invalid observation does.
+	refreshErr := observer.Refresh()
+	active := observer.Observation()
+	if errors.Is(refreshErr, artifact.ErrExecutableUnavailable) || active == nil || !active.ArtifactID.IsValid() {
+		return ErrActiveArtifactUnavailable
+	}
+	if active.ArtifactID != expected {
+		return ErrActiveArtifactMismatch
+	}
+	return nil
+}
+
+func mapPrepareResolveError(err error) error {
+	switch {
+	case errors.Is(err, runtimeupdate.ErrUnsupportedPlatform):
+		return ErrUnsupportedStaging
+	case errors.Is(err, runtimeupdate.ErrInvalidTargetVersion):
+		return ErrInvalidRequest
+	default:
+		return fmt.Errorf("%w: %v", ErrReleaseMetadataInvalid, err)
+	}
+}
+
+// beginPrepareExecution performs the second fresh fence and durable admission
+// while holding the narrow prepare admission barrier and shared lifecycle gate.
+// It returns execute=false for a retained/replayed operation.
+func (e *Executor) beginPrepareExecution(
+	ctx context.Context,
+	intent journal.Intent,
+	observer activeArtifactRefresher,
+	expected artifact.ID,
+) (operation journal.Operation, execute bool, err error) {
+	e.prepareAdmissionMu.Lock()
+	defer e.prepareAdmissionMu.Unlock()
+	if e.closed.Load() {
+		return journal.Operation{}, false, ErrPersistenceUnavailable
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return journal.Operation{}, false, err
+	}
+	if e.closed.Load() {
+		return journal.Operation{}, false, ErrPersistenceUnavailable
+	}
+	operation, found, err := e.journal.Resolve(ctx, e.authority, intent)
+	if err != nil {
+		return journal.Operation{}, false, submissionError(err)
+	}
+	if found {
+		return operation, false, nil
+	}
+	if err := refreshExpectedActiveArtifact(observer, expected); err != nil {
+		return journal.Operation{}, false, err
+	}
+	operation, created, err := e.journal.Begin(ctx, e.authority, intent)
+	if err != nil {
+		return journal.Operation{}, false, submissionError(err)
+	}
+	if !created {
+		return operation, false, nil
+	}
+	markCtx, cancelMark := context.WithTimeout(context.Background(), PrepareUpdateTerminalPersistenceTimeout)
+	operation, err = e.journal.MarkRunning(markCtx, e.authority.RuntimeIdentity, intent.OperationID)
+	cancelMark()
+	if err != nil {
+		return journal.Operation{}, false, fmt.Errorf("%w: %w", ErrPersistenceUnavailable, err)
+	}
+	return operation, true, nil
 }

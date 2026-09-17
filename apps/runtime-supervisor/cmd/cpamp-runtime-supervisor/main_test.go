@@ -19,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
+	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -152,6 +153,55 @@ func TestHTTPServerHasBoundedTimeouts(t *testing.T) {
 		server.MaxHeaderBytes != 16<<10 {
 		t.Fatalf("HTTP server limits = %#v", server)
 	}
+}
+
+func TestPrepareUpdateTransportBudgetIsDedicatedAndOrdered(t *testing.T) {
+	server := newHTTPServer(http.NewServeMux())
+	if server.WriteTimeout != 10*time.Second {
+		t.Fatalf("ordinary Runtime WriteTimeout = %s, want 10s", server.WriteTimeout)
+	}
+	if prepareUpdateResponseTimeout <= lifecycle.PrepareUpdateExecutionTimeout+
+		lifecycle.PrepareUpdateTerminalPersistenceTimeout ||
+		prepareUpdateResponseTimeout <= runtimeupdate.ReleaseClientTimeout {
+		t.Fatalf("prepare response budget = %s, execution=%s persistence=%s release=%s", prepareUpdateResponseTimeout,
+			lifecycle.PrepareUpdateExecutionTimeout, lifecycle.PrepareUpdateTerminalPersistenceTimeout, runtimeupdate.ReleaseClientTimeout)
+	}
+}
+
+func TestPrepareUpdateResponseDeadlineIsRouteSpecific(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		path      string
+		deadlines int
+	}{
+		{name: "ordinary lifecycle", path: "/v1/runtime/operations/start"},
+		{name: "prepare update", path: prepareUpdateResponsePath, deadlines: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+			handler := withPrepareUpdateResponseBudget(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			request := httptest.NewRequest(http.MethodPost, test.path, nil)
+			handler.ServeHTTP(writer, request)
+			if len(writer.deadlines) != test.deadlines {
+				t.Fatalf("write deadlines = %d, want %d", len(writer.deadlines), test.deadlines)
+			}
+			if test.deadlines > 0 && !writer.deadlines[0].After(time.Now().Add(11*time.Minute)) {
+				t.Fatalf("prepare deadline = %s, want route budget near %s", writer.deadlines[0], prepareUpdateResponseTimeout)
+			}
+		})
+	}
+}
+
+type deadlineResponseWriter struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
 }
 
 func TestServeStopsCleanlyWhenContextIsCanceled(t *testing.T) {

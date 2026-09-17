@@ -69,8 +69,9 @@ type process interface {
 }
 
 // Executor owns the shared Start/Stop/Restart serialization and resources for
-// one Supervisor incarnation. The lock covers resolve, precondition and all
-// execution evidence, while cpaprocess remains the final ownership fence.
+// one Supervisor incarnation. The shared lock covers lifecycle execution
+// evidence, while updater staging has its own narrow gate and cpaprocess
+// remains the final ownership fence.
 type Executor struct {
 	mu         sync.Mutex
 	authority  journal.Authority
@@ -82,6 +83,14 @@ type Executor struct {
 	closed     atomic.Bool
 	closeOnce  sync.Once
 	closeErr   error
+
+	// Prepare staging is serialized independently from lifecycle/recovery
+	// execution. The admission mutex makes worker registration and shutdown a
+	// single boundary: Close cannot close the journal while an accepted prepare
+	// is still able to reach terminal persistence.
+	prepareMu          sync.Mutex
+	prepareAdmissionMu sync.Mutex
+	prepareWorkers     sync.WaitGroup
 
 	recoveryMu             sync.Mutex
 	recoveryContext        context.Context
@@ -210,10 +219,13 @@ func submissionError(err error) error {
 	}
 }
 
-// CloseAdmission prevents new lifecycle mutations from entering the shared
-// execution gate. Submissions already queued on the gate recheck this state
-// before resolving or recording durable intent.
+// CloseAdmission prevents new lifecycle mutations and prepare executions from
+// entering their admission boundaries. Submissions already admitted recheck
+// this state before recording durable intent; accepted work is drained by
+// Close.
 func (e *Executor) CloseAdmission() {
+	e.prepareAdmissionMu.Lock()
+	defer e.prepareAdmissionMu.Unlock()
 	e.recoveryMu.Lock()
 	defer e.recoveryMu.Unlock()
 	if e.closed.Swap(true) {
@@ -233,6 +245,7 @@ func (e *Executor) CloseAdmission() {
 func (e *Executor) Close() error {
 	e.CloseAdmission()
 	e.recoveryWorkers.Wait()
+	e.prepareWorkers.Wait()
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()

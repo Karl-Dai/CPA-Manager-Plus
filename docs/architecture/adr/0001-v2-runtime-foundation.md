@@ -434,6 +434,16 @@ activation, target readiness validation, process transition, and rollback are
 deferred together to Runtime17, which MUST revalidate staged bytes and enforce
 a fresh active-artifact fence again before its own side effects.
 
+Prepare release lookup and staging are serialized by an updater-only gate and
+do not hold the shared lifecycle/recovery gate during network or filesystem
+I/O. Durable Begin and MarkRunning remain before any staging side effect; a
+second fresh active-artifact fence is required after the released lifecycle
+gate and before Begin. Accepted prepares are tracked through shutdown so
+CloseAdmission rejects new work and the private journal closes only after
+terminal evidence is persisted. Ordinary Runtime requests keep their short
+transport deadlines; `prepare-update` uses a bounded budget ordered as
+operation execution, Supervisor response/write, then Manager request.
+
 ## Phase 1 implementation boundary
 
 Phase 1 MUST establish:

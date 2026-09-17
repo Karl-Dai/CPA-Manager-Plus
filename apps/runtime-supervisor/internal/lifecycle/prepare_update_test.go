@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
@@ -58,6 +60,10 @@ type prepareUpdateFake struct {
 	stageCalls   int
 	resolveErr   error
 	stageErr     error
+	resolveHook  func()
+	stageEntered chan struct{}
+	stageRelease <-chan struct{}
+	stageOnce    sync.Once
 }
 
 type persistentPrepareUpdate struct {
@@ -86,6 +92,9 @@ func (u *prepareUpdateFake) Resolve(_ context.Context, version string) (runtimeu
 	if u.resolveErr != nil {
 		return runtimeupdate.Release{}, u.resolveErr
 	}
+	if u.resolveHook != nil {
+		u.resolveHook()
+	}
 	return runtimeupdate.Release{
 		Version:       version,
 		AssetName:     "official",
@@ -98,6 +107,10 @@ func (u *prepareUpdateFake) Resolve(_ context.Context, version string) (runtimeu
 func (u *prepareUpdateFake) Stage(_ context.Context, release runtimeupdate.Release) (runtimeupdate.Metadata, error) {
 	*u.events = append(*u.events, "stage:"+release.Version)
 	u.stageCalls++
+	if u.stageEntered != nil {
+		u.stageOnce.Do(func() { close(u.stageEntered) })
+		<-u.stageRelease
+	}
 	if u.stageErr != nil {
 		return runtimeupdate.Metadata{}, u.stageErr
 	}
@@ -118,7 +131,7 @@ func TestPrepareUpdateOrdersFreshFenceBeforeNetworkAndDurableIntent(t *testing.T
 		t.Fatalf("PrepareUpdate() = %+v, %v", result, err)
 	}
 	wantEvents := []string{
-		"resolve", "refresh-artifact", "resolve-release:7.3.3", "begin", "running", "stage:7.3.3", "complete:succeeded",
+		"resolve", "refresh-artifact", "resolve-release:7.3.3", "resolve", "refresh-artifact", "begin", "running", "stage:7.3.3", "complete:succeeded",
 	}
 	if !reflect.DeepEqual(f.events, wantEvents) {
 		t.Fatalf("events = %v, want %v", f.events, wantEvents)
@@ -127,6 +140,144 @@ func TestPrepareUpdateOrdersFreshFenceBeforeNetworkAndDurableIntent(t *testing.T
 		f.starter.authority.RuntimeGeneration != 41 || f.starter.RecoveryStatus() != beforeRecovery {
 		t.Fatalf("prepare changed process/generation/recovery: child=%+v generation=%d recovery=%+v",
 			f.child, f.starter.authority.RuntimeGeneration, f.starter.RecoveryStatus())
+	}
+}
+
+func TestPrepareUpdateRefreshesFenceAgainAfterReleaseLookup(t *testing.T) {
+	f := newPrepareFixture(t, activeArtifactA)
+	f.preparer.resolveHook = func() {
+		f.observer.observation.ArtifactID = activeArtifactB
+	}
+	_, err := f.starter.PrepareUpdate(t.Context(), prepareUpdateRequest("prepare-1", "7.3.3", activeArtifactA))
+	if !errors.Is(err, ErrActiveArtifactMismatch) || f.preparer.stageCalls != 0 || containsEvent(f.events, "begin") {
+		t.Fatalf("second fresh fence error=%v stage=%d events=%v", err, f.preparer.stageCalls, f.events)
+	}
+	wantEvents := []string{"resolve", "refresh-artifact", "resolve-release:7.3.3", "resolve", "refresh-artifact"}
+	if !reflect.DeepEqual(f.events, wantEvents) {
+		t.Fatalf("second fence events = %v, want %v", f.events, wantEvents)
+	}
+}
+
+func TestPrepareUpdateStageDoesNotBlockAutomaticRecovery(t *testing.T) {
+	f := newRecoveryFixture(t)
+	var events []string
+	stageEntered := make(chan struct{})
+	stageRelease := make(chan struct{})
+	observer := &prepareArtifactObserver{
+		events:      &events,
+		observation: &artifact.Observation{Engine: artifact.EngineCPA, ArtifactID: activeArtifactA},
+	}
+	preparer := &prepareUpdateFake{
+		events:       &events,
+		stageEntered: stageEntered,
+		stageRelease: stageRelease,
+	}
+	if err := f.executor.EnablePrepareUpdate(observer, preparer); err != nil {
+		t.Fatal(err)
+	}
+	startRecoveryEpoch(t, f, "start")
+	beforeEpoch := recoveryEpoch(f.executor)
+	prepareResult := make(chan struct {
+		operation journal.Operation
+		err       error
+	}, 1)
+	go func() {
+		operation, err := f.executor.PrepareUpdate(t.Context(), prepareUpdateRequest("prepare-1", "7.3.3", activeArtifactA))
+		prepareResult <- struct {
+			operation journal.Operation
+			err       error
+		}{operation: operation, err: err}
+	}()
+	select {
+	case <-stageEntered:
+	case <-time.After(time.Second):
+		t.Fatal("prepare stage did not enter its blocked I/O seam")
+	}
+
+	f.process.exitCurrent(cpaprocess.StateExited, true)
+	waitRecoveryCondition(t, func() bool {
+		return f.process.startCount() == 2 && f.executor.RecoveryStatus() == (RecoveryStatus{State: RecoveryStateArmed, AttemptsRemaining: 2})
+	})
+	select {
+	case result := <-prepareResult:
+		t.Fatalf("prepare completed while stage was blocked: %+v", result)
+	default:
+	}
+	if got := recoveryEpoch(f.executor); got != beforeEpoch {
+		t.Fatalf("prepare/recovery changed epoch during staging: before=%d after=%d", beforeEpoch, got)
+	}
+	if f.process.stopCount() != 0 || observer.Observation().ArtifactID != activeArtifactA {
+		t.Fatalf("prepare altered active runtime authority: stops=%d observation=%+v", f.process.stopCount(), observer.Observation())
+	}
+
+	close(stageRelease)
+	select {
+	case result := <-prepareResult:
+		if result.err != nil || result.operation.State != journal.StateSucceeded {
+			t.Fatalf("prepare result after stage release = %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepare did not complete after stage release")
+	}
+	if got := f.executor.RecoveryStatus(); got != (RecoveryStatus{State: RecoveryStateArmed, AttemptsRemaining: 2}) {
+		t.Fatalf("prepare changed recovery budget after completion: %+v", got)
+	}
+}
+
+func TestPrepareUpdateShutdownDrainsBlockedStageBeforeJournalClose(t *testing.T) {
+	f := newRecoveryFixture(t)
+	var events []string
+	stageEntered := make(chan struct{})
+	stageRelease := make(chan struct{})
+	observer := &prepareArtifactObserver{
+		events:      &events,
+		observation: &artifact.Observation{Engine: artifact.EngineCPA, ArtifactID: activeArtifactA},
+	}
+	preparer := &prepareUpdateFake{events: &events, stageEntered: stageEntered, stageRelease: stageRelease}
+	if err := f.executor.EnablePrepareUpdate(observer, preparer); err != nil {
+		t.Fatal(err)
+	}
+	startRecoveryEpoch(t, f, "start")
+	prepareResult := make(chan error, 1)
+	go func() {
+		_, err := f.executor.PrepareUpdate(t.Context(), prepareUpdateRequest("prepare-shutdown", "7.3.3", activeArtifactA))
+		prepareResult <- err
+	}()
+	select {
+	case <-stageEntered:
+	case <-time.After(time.Second):
+		t.Fatal("prepare stage did not enter its blocked I/O seam")
+	}
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- f.executor.Close() }()
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close returned while prepare stage was blocked: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if f.store.closeCount() != 0 {
+		t.Fatal("journal closed before accepted prepare drained")
+	}
+
+	close(stageRelease)
+	select {
+	case err := <-prepareResult:
+		if err != nil {
+			t.Fatalf("prepare completion during shutdown = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepare did not finish after stage release")
+	}
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close after prepare drain = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after prepare terminal evidence")
+	}
+	if f.store.closeCount() != 1 || !f.store.hasCompletion("prepare-shutdown", journal.StateSucceeded, "") {
+		t.Fatalf("shutdown journal evidence = close=%d events=%v", f.store.closeCount(), f.store.events)
 	}
 }
 
@@ -368,6 +519,12 @@ func containsEvent(events []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func recoveryEpoch(executor *Executor) uint64 {
+	executor.recoveryMu.Lock()
+	defer executor.recoveryMu.Unlock()
+	return executor.recoveryEpoch
 }
 
 func prepareUpdateArchive(t *testing.T, executable []byte) []byte {

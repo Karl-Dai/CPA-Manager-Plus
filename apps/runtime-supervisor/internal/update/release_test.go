@@ -9,8 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type doerFunc func(*http.Request) (*http.Response, error)
@@ -18,7 +23,10 @@ type doerFunc func(*http.Request) (*http.Response, error)
 func (f doerFunc) Do(request *http.Request) (*http.Response, error) { return f(request) }
 
 func TestValidateVersionRequiresExactCanonicalRelease(t *testing.T) {
-	for _, version := range []string{"0.0.0", "7.3.3", "7.4.0-rc.1", "7.4.0-beta+build.2"} {
+	for _, version := range []string{
+		"0.0.0", "7.3.3", "7.4.0-rc.1", "7.4.0-beta+build.2",
+		"7.4.0-alpha-beta", "7.4.0-alpha-beta.1", "7.4.0-x-y-z+build-1",
+	} {
 		if err := ValidateVersion(version); err != nil {
 			t.Fatalf("ValidateVersion(%q) = %v", version, err)
 		}
@@ -26,6 +34,7 @@ func TestValidateVersionRequiresExactCanonicalRelease(t *testing.T) {
 	for _, version := range []string{
 		"", "latest", "v7.3.3", " 7.3.3", "7.3.3 ", "07.3.3", "7.03.3", "7.3.03",
 		"7.3", "7.3.3-01", "7.3.3/asset", "../7.3.3", "https://example.test/7.3.3",
+		"7.3.3-", "7.3.3-alpha.", "7.3.3-alpha..1",
 	} {
 		if err := ValidateVersion(version); err == nil {
 			t.Fatalf("ValidateVersion(%q) error = nil", version)
@@ -184,6 +193,9 @@ func TestSourceBoundsMetadataAndArchiveAndVerifiesDigest(t *testing.T) {
 func TestProductionHTTPClientIgnoresProxyEnvironmentAndRejectsUnsafeRedirects(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
 	client := newHTTPClient()
+	if ReleaseClientTimeout != 5*time.Minute || client.Timeout != ReleaseClientTimeout {
+		t.Fatalf("release client timeout = %s, want bounded 5m", client.Timeout)
+	}
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok || transport.Proxy != nil {
 		t.Fatalf("production transport proxy = %#v", client.Transport)
@@ -211,9 +223,37 @@ func TestAcceptedV733GitHubDigestsMatchPinnedDockerArchives(t *testing.T) {
 		"CLIProxyAPI_7.3.3_linux_amd64.tar.gz":   "sha256:7af8c99cd08eee3ccc81d1596e8a31785674d3de6bd7ec61416d59493dd8fc01",
 		"CLIProxyAPI_7.3.3_linux_aarch64.tar.gz": "sha256:5f320e3fae52af00f07b78201311e9d096b36e759441d948de48a10f49e71883",
 	}
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller did not identify the release test source")
+	}
+	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", ".."))
+	dockerfile, err := os.ReadFile(filepath.Join(repositoryRoot, "Dockerfile.runtime"))
+	if err != nil {
+		t.Fatalf("read repository Dockerfile.runtime: %v", err)
+	}
+	dockerfileText := string(dockerfile)
+	version := regexp.MustCompile(`cpa_version="([^"]+)"`).FindStringSubmatch(dockerfileText)
+	if len(version) != 2 || version[1] != "7.3.3" {
+		t.Fatalf("Dockerfile.runtime CPA version = %v, want 7.3.3", version)
+	}
+	readPin := func(name, pattern string) string {
+		match := regexp.MustCompile(pattern).FindStringSubmatch(dockerfileText)
+		if len(match) != 2 {
+			t.Fatalf("Dockerfile.runtime %s archive pin is missing or malformed", name)
+		}
+		return match[1]
+	}
+	pins := map[string]string{
+		"CLIProxyAPI_7.3.3_linux_amd64.tar.gz":   readPin("amd64", `amd64\)\s*asset_arch="amd64";\s*asset_sha256="([0-9a-f]{64})"`),
+		"CLIProxyAPI_7.3.3_linux_aarch64.tar.gz": readPin("arm64", `arm64\)\s*asset_arch="aarch64";\s*asset_sha256="([0-9a-f]{64})"`),
+	}
 	for name, digest := range fixtures {
 		if !canonicalDigest(digest) || !strings.Contains(name, "7.3.3") {
 			t.Fatalf("invalid pinned fixture %s=%s", name, digest)
+		}
+		if pins[name] != strings.TrimPrefix(digest, "sha256:") {
+			t.Fatalf("Dockerfile.runtime pin drift for %s: got %q want %q", name, pins[name], digest)
 		}
 	}
 }

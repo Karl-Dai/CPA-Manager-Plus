@@ -22,6 +22,10 @@ const (
 	officialRepositoryName  = "CLIProxyAPI"
 	githubAPIHost           = "api.github.com"
 	githubHost              = "github.com"
+	// ReleaseClientTimeout bounds each official metadata or asset request. The
+	// prepare-update transport has a larger, route-specific budget because a
+	// complete operation also includes both requests and local staging I/O.
+	ReleaseClientTimeout    = 5 * time.Minute
 	maxReleaseMetadataBytes = 1 << 20
 	maxReleaseArchiveBytes  = 256 << 20
 	metadataAccept          = "application/vnd.github+json"
@@ -242,7 +246,7 @@ func newHTTPClient() *http.Client {
 	transport.ExpectContinueTimeout = time.Second
 	return &http.Client{
 		Transport: transport,
-		Timeout:   5 * time.Minute,
+		Timeout:   ReleaseClientTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 || req.URL.Scheme != "https" || !allowedDownloadHost(req.URL.Hostname()) {
 				return errors.New("unsafe GitHub release redirect")
