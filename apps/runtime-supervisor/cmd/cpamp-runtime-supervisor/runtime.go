@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
@@ -14,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/protocol"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
+	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
 type runtimeHandler struct {
@@ -75,6 +78,17 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		}, store, child, cfg.cpaExecutable)
 		if err != nil {
 			return nil, errors.Join(err, store.Close())
+		}
+		if runtimeupdate.SupportedPlatform(goruntime.GOOS, goruntime.GOARCH) {
+			stageRoot := filepath.Join(filepath.Dir(cfg.journalPath), "artifacts", "cpa")
+			preparer, prepareErr := runtimeupdate.NewPreparer(stageRoot)
+			if prepareErr != nil {
+				return nil, errors.Join(fmt.Errorf("configure trusted update staging: %w", prepareErr), runtime.executor.Close())
+			}
+			if prepareErr := runtime.executor.EnablePrepareUpdate(artifactObserver, preparer); prepareErr != nil {
+				return nil, errors.Join(fmt.Errorf("enable trusted update staging: %w", prepareErr), runtime.executor.Close())
+			}
+			settings.PrepareUpdate = runtime.executor
 		}
 		settings.Start = runtime.executor
 		settings.Stop = runtime.executor

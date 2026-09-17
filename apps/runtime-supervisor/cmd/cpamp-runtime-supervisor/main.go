@@ -23,6 +23,10 @@ const (
 	defaultRuntimeAddr = "127.0.0.1:18318"
 	defaultCPAAddr     = "127.0.0.1:8317"
 	shutdownTimeout    = 10 * time.Second
+	// The ordinary Server WriteTimeout remains short. Only the typed prepare
+	// update route receives this longer, still-bounded response budget.
+	prepareUpdateResponseTimeout = 12 * time.Minute
+	prepareUpdateResponsePath    = "/v1/runtime/operations/prepare-update"
 )
 
 type config struct {
@@ -168,11 +172,30 @@ func serveWithShutdownTimeout(ctx context.Context, listener net.Listener, handle
 
 func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
-		Handler:           handler,
+		Handler:           withPrepareUpdateResponseBudget(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
+}
+
+func withPrepareUpdateResponseBudget(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != prepareUpdateResponsePath {
+			next.ServeHTTP(w, r)
+			return
+		}
+		controller := http.NewResponseController(w)
+		if err := controller.SetWriteDeadline(time.Now().Add(prepareUpdateResponseTimeout)); err != nil {
+			// A real net/http server supports this controller. Fail closed when a
+			// custom writer cannot provide the route-specific deadline instead of
+			// silently disabling the bounded prepare contract.
+			http.Error(w, "prepare-update response deadline unavailable", http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
+		next.ServeHTTP(w, r)
+	})
 }

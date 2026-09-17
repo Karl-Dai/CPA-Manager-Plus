@@ -126,6 +126,14 @@ func TestExternalClientLifecycleMutationsFailLocally(t *testing.T) {
 			}
 		})
 	}
+	prepareResult, prepareErr := client.PrepareUpdate(t.Context(), model.RuntimePrepareUpdateRequest{
+		RuntimeMutationRequest:   request,
+		ExpectedActiveArtifactID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetVersion:            "7.3.3",
+	})
+	if !errors.Is(prepareErr, ErrRuntimeMutationUnsupported) || !reflect.DeepEqual(prepareResult, model.RuntimeOperationResult{}) {
+		t.Fatalf("external PrepareUpdate() = %#v, %v", prepareResult, prepareErr)
+	}
 	if requestCount != 0 {
 		t.Fatalf("external lifecycle mutations made %d network requests", requestCount)
 	}

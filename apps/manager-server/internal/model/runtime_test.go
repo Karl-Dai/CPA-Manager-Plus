@@ -52,6 +52,54 @@ func TestRuntimeCapabilitiesSupportsExactCapability(t *testing.T) {
 	}
 }
 
+func TestRuntimePrepareUpdateRequestValidate(t *testing.T) {
+	valid := RuntimePrepareUpdateRequest{
+		RuntimeMutationRequest: RuntimeMutationRequest{
+			OperationID: "prepare-1", ExpectedRuntimeIdentity: "runtime-01", ExpectedRuntimeGeneration: 7,
+		},
+		ExpectedActiveArtifactID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetVersion:            "7.4.0-rc.1",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid request: %v", err)
+	}
+	for _, version := range []string{"7.4.0-alpha-beta", "7.4.0-alpha-beta.1", "7.4.0-x-y-z+build-1"} {
+		t.Run("accept "+version, func(t *testing.T) {
+			request := valid
+			request.TargetVersion = version
+			if err := request.Validate(); err != nil {
+				t.Fatalf("Validate(%q) error = %v", version, err)
+			}
+		})
+	}
+	for name, mutate := range map[string]func(*RuntimePrepareUpdateRequest){
+		"missing operation":           func(request *RuntimePrepareUpdateRequest) { request.OperationID = "" },
+		"invalid artifact":            func(request *RuntimePrepareUpdateRequest) { request.ExpectedActiveArtifactID = "sha256:ABC" },
+		"latest":                      func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "latest" },
+		"tag alias":                   func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "v7.3.3" },
+		"URL":                         func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "https://example.test/7.3.3" },
+		"path":                        func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "../7.3.3" },
+		"whitespace":                  func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = " 7.3.3" },
+		"leading zero":                func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "07.3.3" },
+		"empty prerelease":            func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "7.4.0-" },
+		"trailing separator":          func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "7.4.0-alpha." },
+		"empty prerelease identifier": func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "7.4.0-alpha..1" },
+		"prerelease leading zero":     func(request *RuntimePrepareUpdateRequest) { request.TargetVersion = "7.4.0-01" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := valid
+			mutate(&request)
+			if err := request.Validate(); err == nil {
+				t.Fatal("Validate() error = nil")
+			}
+		})
+	}
+	if !RuntimeOperationPrepareUpdate.IsValid() ||
+		!(RuntimeCapabilities{RuntimeCapabilityPrepareUpdate}).Supports(RuntimeCapabilityPrepareUpdate) {
+		t.Fatal("prepare-update operation/capability is not recognized")
+	}
+}
+
 func TestRuntimeObservedStatusValidate(t *testing.T) {
 	activeArtifact := &ActiveGatewayArtifact{
 		Engine:     "cpa",

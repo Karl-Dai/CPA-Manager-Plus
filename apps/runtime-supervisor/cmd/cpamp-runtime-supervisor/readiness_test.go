@@ -255,7 +255,7 @@ func assertReadiness(t *testing.T, handler http.Handler, state string) {
 	t.Helper()
 	got := requestRuntime(t, handler, "/v1/runtime/status")
 	if got.State != state || got.CPAObservedVersion != "" || got.RuntimeIdentity != "runtime-01" || got.RuntimeGeneration != 41 ||
-		got.ProtocolVersion != "v1" || !reflect.DeepEqual(got.Capabilities, []string{"start", "stop", "restart"}) {
+		got.ProtocolVersion != "v1" || !reflect.DeepEqual(got.Capabilities, expectedRuntimeCapabilities()) {
 		t.Fatalf("status = %+v, want %s with unchanged authority/capabilities and no invented version", got, state)
 	}
 }

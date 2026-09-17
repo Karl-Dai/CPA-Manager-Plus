@@ -16,15 +16,21 @@ import (
 )
 
 const (
-	embeddedRuntimeProtocolVersion = "v1"
-	embeddedRuntimeFeaturesHeader  = "X-CPAMP-Runtime-Features"
-	embeddedArtifactFeature        = "active-gateway-artifact-v1"
-	embeddedRuntimeStatusPath      = "/v1/runtime/status"
-	embeddedRuntimeStartPath       = "/v1/runtime/operations/start"
-	embeddedRuntimeStopPath        = "/v1/runtime/operations/stop"
-	embeddedRuntimeRestartPath     = "/v1/runtime/operations/restart"
-	embeddedRuntimeRequestTimeout  = 30 * time.Second
-	embeddedRuntimeMaxResponseBody = 64 << 10
+	embeddedRuntimeProtocolVersion   = "v1"
+	embeddedRuntimeFeaturesHeader    = "X-CPAMP-Runtime-Features"
+	embeddedArtifactFeature          = "active-gateway-artifact-v1"
+	embeddedRuntimeStatusPath        = "/v1/runtime/status"
+	embeddedRuntimeStartPath         = "/v1/runtime/operations/start"
+	embeddedRuntimeStopPath          = "/v1/runtime/operations/stop"
+	embeddedRuntimeRestartPath       = "/v1/runtime/operations/restart"
+	embeddedRuntimePrepareUpdatePath = "/v1/runtime/operations/prepare-update"
+	embeddedRuntimeRequestTimeout    = 30 * time.Second
+	// Prepare-update is the only long-running Runtime mutation. Keep its
+	// request budget separate so status and ordinary lifecycle calls retain
+	// their short timeout semantics. This remains above the Supervisor's
+	// route-specific response budget.
+	embeddedRuntimePrepareUpdateTimeout = 13 * time.Minute
+	embeddedRuntimeMaxResponseBody      = 64 << 10
 )
 
 type RuntimeTokenSource interface {
@@ -66,9 +72,10 @@ func (s *FileRuntimeTokenSource) Token(ctx context.Context) (string, error) {
 // EmbeddedClient observes CPA through the authenticated Runtime Supervisor
 // protocol.
 type EmbeddedClient struct {
-	baseURL     string
-	tokenSource RuntimeTokenSource
-	httpClient  *http.Client
+	baseURL           string
+	tokenSource       RuntimeTokenSource
+	httpClient        *http.Client
+	prepareHTTPClient *http.Client
 }
 
 func NewEmbeddedClient(baseURL string, token string) *EmbeddedClient {
@@ -79,14 +86,19 @@ func NewEmbeddedClientWithTokenSource(baseURL string, tokenSource RuntimeTokenSo
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	return &EmbeddedClient{
-		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		tokenSource: tokenSource,
-		httpClient: &http.Client{
-			Transport: transport,
-			Timeout:   embeddedRuntimeRequestTimeout,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+		baseURL:           strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		tokenSource:       tokenSource,
+		httpClient:        newRuntimeHTTPClient(transport, embeddedRuntimeRequestTimeout),
+		prepareHTTPClient: newRuntimeHTTPClient(transport, embeddedRuntimePrepareUpdateTimeout),
+	}
+}
+
+func newRuntimeHTTPClient(transport http.RoundTripper, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
 	}
 }
@@ -183,6 +195,14 @@ type embeddedMutationRequest struct {
 	ExpectedRuntimeGeneration uint64 `json:"expectedRuntimeGeneration"`
 }
 
+type embeddedPrepareUpdateRequest struct {
+	OperationID               string `json:"operationId"`
+	ExpectedRuntimeIdentity   string `json:"expectedRuntimeIdentity"`
+	ExpectedRuntimeGeneration uint64 `json:"expectedRuntimeGeneration"`
+	ExpectedActiveArtifactID  string `json:"expectedActiveArtifactId"`
+	TargetVersion             string `json:"targetVersion"`
+}
+
 type embeddedOperationResponse struct {
 	OperationID       string                 `json:"operationId"`
 	OperationType     string                 `json:"operationType"`
@@ -213,6 +233,31 @@ func (c *EmbeddedClient) Restart(ctx context.Context, request model.RuntimeMutat
 	return c.mutate(ctx, embeddedRuntimeRestartPath, model.RuntimeOperationRestart, request)
 }
 
+func (c *EmbeddedClient) PrepareUpdate(ctx context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+	if err := request.Validate(); err != nil {
+		return model.RuntimeOperationResult{}, fmt.Errorf("validate embedded Runtime %s request: %w", model.RuntimeOperationPrepareUpdate, err)
+	}
+	payload, err := json.Marshal(embeddedPrepareUpdateRequest{
+		OperationID:               request.OperationID,
+		ExpectedRuntimeIdentity:   string(request.ExpectedRuntimeIdentity),
+		ExpectedRuntimeGeneration: uint64(request.ExpectedRuntimeGeneration),
+		ExpectedActiveArtifactID:  string(request.ExpectedActiveArtifactID),
+		TargetVersion:             request.TargetVersion,
+	})
+	if err != nil {
+		return model.RuntimeOperationResult{}, fmt.Errorf("encode embedded Runtime %s request: %w", model.RuntimeOperationPrepareUpdate, err)
+	}
+	return c.submitMutationWithClient(
+		c.prepareHTTPClient,
+		ctx,
+		embeddedRuntimePrepareUpdatePath,
+		model.RuntimeOperationPrepareUpdate,
+		request.OperationID,
+		request.ExpectedRuntimeIdentity,
+		payload,
+	)
+}
+
 func (c *EmbeddedClient) mutate(
 	ctx context.Context,
 	requestPath string,
@@ -230,6 +275,32 @@ func (c *EmbeddedClient) mutate(
 	if err != nil {
 		return model.RuntimeOperationResult{}, fmt.Errorf("encode embedded Runtime %s request: %w", operationType, err)
 	}
+	return c.submitMutation(ctx, requestPath, operationType, request.OperationID, request.ExpectedRuntimeIdentity, payload)
+}
+
+func (c *EmbeddedClient) submitMutation(
+	ctx context.Context,
+	requestPath string,
+	operationType model.RuntimeOperationType,
+	operationID string,
+	expectedRuntimeIdentity model.RuntimeIdentity,
+	payload []byte,
+) (model.RuntimeOperationResult, error) {
+	return c.submitMutationWithClient(c.httpClient, ctx, requestPath, operationType, operationID, expectedRuntimeIdentity, payload)
+}
+
+func (c *EmbeddedClient) submitMutationWithClient(
+	client *http.Client,
+	ctx context.Context,
+	requestPath string,
+	operationType model.RuntimeOperationType,
+	operationID string,
+	expectedRuntimeIdentity model.RuntimeIdentity,
+	payload []byte,
+) (model.RuntimeOperationResult, error) {
+	if client == nil {
+		return model.RuntimeOperationResult{}, errors.New("embedded Runtime HTTP client is unavailable")
+	}
 	token, err := c.runtimeToken(ctx)
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
@@ -242,7 +313,7 @@ func (c *EmbeddedClient) mutate(
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+token)
 
-	response, err := c.httpClient.Do(httpRequest)
+	response, err := client.Do(httpRequest)
 	if err != nil {
 		return model.RuntimeOperationResult{}, fmt.Errorf("submit embedded Runtime %s: %w", operationType, err)
 	}
@@ -274,8 +345,8 @@ func (c *EmbeddedClient) mutate(
 	if err := result.Validate(); err != nil {
 		return model.RuntimeOperationResult{}, fmt.Errorf("validate embedded Runtime %s result: %w", operationType, err)
 	}
-	if result.OperationID != request.OperationID || result.OperationType != operationType ||
-		result.RuntimeIdentity != request.ExpectedRuntimeIdentity {
+	if result.OperationID != operationID || result.OperationType != operationType ||
+		result.RuntimeIdentity != expectedRuntimeIdentity {
 		return model.RuntimeOperationResult{}, fmt.Errorf("validate embedded Runtime %s result: response does not match request", operationType)
 	}
 	return result, nil
