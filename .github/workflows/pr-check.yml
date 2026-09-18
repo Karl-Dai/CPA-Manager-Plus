@@ -162,6 +162,10 @@ jobs:
         working-directory: apps/runtime-supervisor
         run: go test ./...
 
+      - name: Test deterministic Runtime prepare and staging
+        working-directory: apps/runtime-supervisor
+        run: go test ./internal/update -run '^(TestSourceResolvesOnlyExactOfficialReleaseAsset|TestSourceBoundsMetadataAndArchiveAndVerifiesDigest|TestStoreStagesOnlyExactExecutableWithExactIdentity|TestStoreReusesOnlyVerifiedImmutableFinalStageAcrossReopen)$' -count=1
+
       - name: Race test
         working-directory: apps/runtime-supervisor
         run: go test -race ./...
@@ -414,6 +418,12 @@ jobs:
           CPAMP_RUNTIME18_PORT: '18317'
           CPAMP_RUNTIME18_SKIP_BUILD: 'true'
         run: bin/ci/runtime18-secret-state-e2e.sh
+
+      - name: Run Runtime Phase1 exit E2E
+        env:
+          CPAMP_RUNTIME19_PORT: '18317'
+          CPAMP_RUNTIME19_SKIP_BUILD: 'true'
+        run: bin/ci/runtime19-phase1-exit-e2e.sh
 
   demo-docs:
     name: Demo and Docs
