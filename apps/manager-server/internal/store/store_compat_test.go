@@ -15,6 +15,68 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
+// TestStoreCompatModelPricesToleratesFloatConfiguredFlags loads a database
+// whose model_prices configured-flag columns hold real values (observed in the
+// wild as a legacy sync bug writing cache prices into the flag columns) instead
+// of strict integers. Loading must not fail and any nonzero value counts as
+// configured.
+func TestStoreCompatModelPricesToleratesFloatConfiguredFlags(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "float-flags.sqlite")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := raw.Exec(`create table model_prices (
+			model text primary key,
+			prompt_per_1m real not null,
+			completion_per_1m real not null,
+			cache_per_1m real not null,
+			cache_read_per_1m real not null default 0,
+			cache_creation_per_1m real not null default 0,
+			prompt_configured integer not null default 0,
+			completion_configured integer not null default 0,
+			cache_read_configured integer not null default 0,
+			cache_creation_configured integer not null default 0,
+			source text,
+			source_model_id text,
+			raw_json text,
+			updated_at_ms integer not null,
+			synced_at_ms integer
+		)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("create model_prices: %v", err)
+	}
+	if _, err := raw.Exec(`insert into model_prices (
+		model, prompt_per_1m, completion_per_1m, cache_per_1m, cache_read_per_1m, cache_creation_per_1m,
+		prompt_configured, completion_configured, cache_read_configured, cache_creation_configured,
+		source, updated_at_ms
+	) values ('claude-fable-5', 10, 50, 1, 1, 12.5, 1, 1, 12.5, 1, 'litellm', 1)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("seed float configured flag: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	prices, err := db.LoadModelPrices(context.Background())
+	if err != nil {
+		t.Fatalf("load model prices with float configured flags: %v", err)
+	}
+	price, ok := prices["claude-fable-5"]
+	if !ok {
+		t.Fatalf("missing claude-fable-5 in %#v", prices)
+	}
+	if !price.CacheReadConfigured {
+		t.Fatalf("nonzero float configured flag should read as configured: %#v", price)
+	}
+}
+
 func TestStoreCompatMigratesLegacyCodexInspectionOwnershipIdentity(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ownership.sqlite")
 	raw, err := sql.Open("sqlite", dbPath)
