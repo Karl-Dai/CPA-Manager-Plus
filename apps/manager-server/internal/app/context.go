@@ -19,6 +19,7 @@ import (
 	codexinspectionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	collectorsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
+	cpaupdatesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	dashboardsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/dashboard"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
@@ -42,6 +43,7 @@ type DatabaseMaintenanceStatusProvider interface {
 
 type Context struct {
 	UpdateCheckService *updatechecksvc.Service
+	CPAUpdateService   *cpaupdatesvc.Service
 	Config             config.Config
 	Store              *store.Store
 	Collector          *collector.Manager

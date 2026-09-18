@@ -12,16 +12,36 @@ import (
 
 // ExternalClient observes a separately managed CPA through its Management API.
 type ExternalClient struct {
-	baseURL string
-	key     string
+	connectionSource ExternalConnectionSource
 }
 
+// ExternalConnectionSource resolves the current Manager-owned CPA connection.
+// Status calls it for every observation so setup and connection changes take
+// effect without restarting Manager Server.
+type ExternalConnectionSource func(context.Context) (baseURL string, managementKey string, err error)
+
 func NewExternalClient(baseURL string, key string) *ExternalClient {
-	return &ExternalClient{baseURL: baseURL, key: key}
+	return NewExternalClientWithConnectionSource(func(context.Context) (string, string, error) {
+		return baseURL, key, nil
+	})
+}
+
+func NewExternalClientWithConnectionSource(source ExternalConnectionSource) *ExternalClient {
+	return &ExternalClient{connectionSource: source}
 }
 
 func (c *ExternalClient) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
-	version, err := cpa.ObserveManagementAPI(ctx, c.baseURL, c.key)
+	if c == nil || c.connectionSource == nil {
+		return model.RuntimeObservedStatus{}, errors.New("observe external CPA: connection source is unavailable")
+	}
+	baseURL, managementKey, err := c.connectionSource(ctx)
+	if err != nil {
+		return model.RuntimeObservedStatus{}, fmt.Errorf("resolve external CPA connection: %w", err)
+	}
+	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(managementKey) == "" {
+		return model.RuntimeObservedStatus{}, errors.New("observe external CPA: CPA connection is not configured")
+	}
+	version, err := cpa.ObserveManagementAPI(ctx, baseURL, managementKey)
 	if err != nil {
 		return model.RuntimeObservedStatus{}, fmt.Errorf("observe external CPA: %w", err)
 	}
