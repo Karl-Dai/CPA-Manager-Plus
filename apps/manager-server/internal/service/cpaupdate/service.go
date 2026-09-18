@@ -19,6 +19,7 @@ import (
 const (
 	discoverySchemaVersion = 1
 	discoveryCooldown      = time.Minute
+	discoveryFreshness     = 7 * time.Hour
 	maxPersistedErrorBytes = 512
 )
 
@@ -250,7 +251,7 @@ func (s *Service) project(ctx context.Context) (Status, error) {
 		TargetVersion: s.state.TargetVersion,
 		LastSuccessAt: s.state.LastSuccessAt,
 		LastError:     s.state.LastError,
-		Stale:         s.state.LastSuccessAt.IsZero() || s.state.LastError != "",
+		Stale:         discoveryIsStale(s.state, s.now()),
 	}
 	if s.mode == model.RuntimeModeExternal {
 		if err := observed.Validate(); err != nil {
@@ -295,4 +296,11 @@ func (s *Service) project(ctx context.Context) (Status, error) {
 		status.Actionable = !status.Stale && status.PrepareSupported && status.ActivateSupported
 	}
 	return status, nil
+}
+
+func discoveryIsStale(state DiscoveryState, now time.Time) bool {
+	if state.LastSuccessAt.IsZero() || state.LastError != "" || now.Before(state.LastSuccessAt) {
+		return true
+	}
+	return now.Sub(state.LastSuccessAt) > discoveryFreshness
 }

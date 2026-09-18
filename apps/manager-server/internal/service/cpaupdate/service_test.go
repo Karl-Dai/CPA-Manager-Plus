@@ -135,6 +135,7 @@ func TestEmbeddedRecommendationStateMatrix(t *testing.T) {
 			source := &fakeSource{target: "9.9.9"}
 			service := New(persistedDiscovery(t, "7.3.4", checkedAt), runtimeClient, model.RuntimeModeEmbedded)
 			service.source = source
+			service.now = func() time.Time { return checkedAt }
 
 			status, err := service.Status(t.Context())
 			if err != nil {
@@ -148,6 +149,54 @@ func TestEmbeddedRecommendationStateMatrix(t *testing.T) {
 			}
 			if source.requests.Load() != 0 {
 				t.Fatalf("GET status performed %d discovery requests", source.requests.Load())
+			}
+		})
+	}
+}
+
+func TestDiscoveryFreshnessWindow(t *testing.T) {
+	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		lastSuccess time.Time
+		wantStale   bool
+		wantAction  bool
+	}{
+		{
+			name:        "exactly at freshness limit",
+			lastSuccess: now.Add(-discoveryFreshness),
+			wantAction:  true,
+		},
+		{
+			name:        "older than freshness limit",
+			lastSuccess: now.Add(-discoveryFreshness - time.Nanosecond),
+			wantStale:   true,
+		},
+		{
+			name:        "success timestamp is in the future",
+			lastSuccess: now.Add(time.Minute),
+			wantStale:   true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := New(
+				persistedDiscovery(t, "7.3.4", test.lastSuccess),
+				&observationOnlyRuntime{status: embeddedObservation(
+					"7.3.3",
+					model.RuntimeCapabilityPrepareUpdate,
+					model.RuntimeCapabilityActivateUpdate,
+				)},
+				model.RuntimeModeEmbedded,
+			)
+			service.now = func() time.Time { return now }
+
+			status, err := service.Status(t.Context())
+			if err != nil {
+				t.Fatalf("Status() error = %v", err)
+			}
+			if status.State != StateUpdateAvailable || status.Stale != test.wantStale || status.Actionable != test.wantAction {
+				t.Fatalf("Status() = %#v, want state=%q stale=%v actionable=%v", status, StateUpdateAvailable, test.wantStale, test.wantAction)
 			}
 		})
 	}

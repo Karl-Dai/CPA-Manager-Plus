@@ -167,17 +167,16 @@ func runServer() {
 			runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile),
 		)
 	} else {
-		externalConfig, _, _, resolveErr := serverApp.AppContext().ManagerConfigService.ResolveManagerConfigWithSource(ctx)
-		if resolveErr != nil {
-			log.Printf("resolve External Runtime connection for CPA update status: %v", resolveErr)
-		}
-		baseURL := externalConfig.CPAConnection.CPABaseURL
-		managementKey := externalConfig.CPAConnection.ManagementKey
-		if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(managementKey) == "" {
-			baseURL = cfg.CPAUpstreamURL
-			managementKey = cfg.ManagementKey
-		}
-		runtimeClient = runtimeservice.NewExternalClient(baseURL, managementKey)
+		managerConfigService := serverApp.AppContext().ManagerConfigService
+		runtimeClient = runtimeservice.NewExternalClientWithConnectionSource(
+			func(statusCtx context.Context) (string, string, error) {
+				externalConfig, _, _, resolveErr := managerConfigService.ResolveManagerConfigWithSource(statusCtx)
+				if resolveErr != nil {
+					return "", "", resolveErr
+				}
+				return externalConfig.CPAConnection.CPABaseURL, externalConfig.CPAConnection.ManagementKey, nil
+			},
+		)
 	}
 	serverApp.AppContext().CPAUpdateService = cpaupdateservice.New(db, runtimeClient, runtimeMode)
 	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 10*time.Second)

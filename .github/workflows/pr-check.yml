@@ -133,7 +133,7 @@ jobs:
 
       - name: Race test Runtime ownership paths
         working-directory: apps/manager-server
-        run: go test -race ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap
+        run: go test -race ./internal/service/cpaupdate ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap
 
       - name: Vet
         working-directory: apps/manager-server

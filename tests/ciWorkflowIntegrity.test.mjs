@@ -181,7 +181,7 @@ describe('GitHub Actions workflow integrity', () => {
     const windowsJob = jobBlock(workflow, 'manager-server-windows-sqlite');
 
     expect(managerJob).toContain(
-      'go test -race ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap'
+      'go test -race ./internal/service/cpaupdate ./internal/service/runtime ./internal/repository/setting ./internal/service/bootstrap'
     );
     expect(managerJob).toContain('run: go vet ./...');
     expect(windowsJob).toContain(

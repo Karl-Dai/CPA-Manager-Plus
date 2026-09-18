@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -92,6 +93,81 @@ func TestExternalClientStatusUsesCallerContext(t *testing.T) {
 	}
 	if !reflect.DeepEqual(status, model.RuntimeObservedStatus{}) {
 		t.Fatalf("Status() = %#v, want zero value", status)
+	}
+}
+
+func TestExternalClientStatusResolvesCurrentConnectionEveryTime(t *testing.T) {
+	var requestsA atomic.Int32
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsA.Add(1)
+		if got := r.Header.Get("Authorization"); got != "Bearer key-a" {
+			t.Errorf("connection A Authorization = %q", got)
+		}
+		w.Header().Set("X-CPA-Version", "7.3.3")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer serverA.Close()
+
+	var requestsB atomic.Int32
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsB.Add(1)
+		if got := r.Header.Get("Authorization"); got != "Bearer key-b" {
+			t.Errorf("connection B Authorization = %q", got)
+		}
+		w.Header().Set("X-CPA-Version", "7.3.4")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer serverB.Close()
+
+	baseURL, managementKey := serverA.URL, "key-a"
+	resolverCalls := 0
+	client := NewExternalClientWithConnectionSource(func(context.Context) (string, string, error) {
+		resolverCalls++
+		return baseURL, managementKey, nil
+	})
+
+	first, err := client.Status(t.Context())
+	if err != nil || first.CPAObservedVersion != "7.3.3" {
+		t.Fatalf("first Status() = %#v, %v", first, err)
+	}
+	baseURL, managementKey = serverB.URL, "key-b"
+	second, err := client.Status(t.Context())
+	if err != nil || second.CPAObservedVersion != "7.3.4" {
+		t.Fatalf("second Status() = %#v, %v", second, err)
+	}
+	if resolverCalls != 2 || requestsA.Load() != 1 || requestsB.Load() != 1 {
+		t.Fatalf("resolver calls = %d, requests A/B = %d/%d", resolverCalls, requestsA.Load(), requestsB.Load())
+	}
+}
+
+func TestExternalClientStatusObservesConnectionConfiguredAfterStartup(t *testing.T) {
+	baseURL, managementKey := "", ""
+	resolverCalls := 0
+	client := NewExternalClientWithConnectionSource(func(context.Context) (string, string, error) {
+		resolverCalls++
+		return baseURL, managementKey, nil
+	})
+
+	if _, err := client.Status(t.Context()); err == nil || !strings.Contains(err.Error(), "connection is not configured") {
+		t.Fatalf("unconfigured Status() error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer configured-key" {
+			t.Errorf("configured Authorization = %q", got)
+		}
+		w.Header().Set("X-CPA-Version", "7.3.4")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	baseURL, managementKey = server.URL, "configured-key"
+
+	status, err := client.Status(t.Context())
+	if err != nil || status.CPAObservedVersion != "7.3.4" {
+		t.Fatalf("configured Status() = %#v, %v", status, err)
+	}
+	if resolverCalls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", resolverCalls)
 	}
 }
 
