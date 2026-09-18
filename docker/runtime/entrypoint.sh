@@ -46,11 +46,31 @@ ensure_root_owned_directory() {
   require_root_owned_directory "$trusted_directory"
 }
 
-require_root_owned_directory "$runtime_root"
+ensure_real_directory() {
+  state_directory="$1"
+  if [ -e "$state_directory" ] || [ -L "$state_directory" ]; then
+    if [ ! -d "$state_directory" ] || [ -L "$state_directory" ]; then
+      echo "Gateway state path is not a real directory: ${state_directory}" >&2
+      exit 1
+    fi
+    return
+  fi
+  mkdir "$state_directory"
+  if [ ! -d "$state_directory" ] || [ -L "$state_directory" ]; then
+    echo "Gateway state path is not a real directory: ${state_directory}" >&2
+    exit 1
+  fi
+}
+
+ensure_root_owned_directory "$runtime_root"
 ensure_root_owned_directory "$supervisor_dir"
 ensure_root_owned_directory "$artifact_root"
 ensure_root_owned_directory "$artifact_cpa_root"
-mkdir -p "$gateway_dir/auth" "$gateway_dir/logs" "$gateway_dir/plugins" "$token_dir"
+ensure_real_directory "$gateway_dir"
+ensure_real_directory "$gateway_dir/auth"
+ensure_real_directory "$gateway_dir/logs"
+ensure_real_directory "$gateway_dir/plugins"
+mkdir -p "$token_dir"
 chown root:root "$runtime_root" "$token_dir"
 chmod 0711 "$runtime_root"
 chmod 0700 "$token_dir"

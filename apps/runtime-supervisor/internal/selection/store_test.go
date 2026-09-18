@@ -100,6 +100,41 @@ func TestSelectionPresenceFailsClosedForStrictOrInvalidStageState(t *testing.T) 
 	}
 }
 
+func TestSelectionStoreRejectsUntrustedParentShape(t *testing.T) {
+	for name, prepare := range map[string]func(*testing.T, string){
+		"symlink": func(t *testing.T, parent string) {
+			target := filepath.Join(t.TempDir(), "target")
+			if err := os.Mkdir(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, parent); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"group writable": func(t *testing.T, parent string) {
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(parent, 0o770); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			stages := newStageStore(t, filepath.Join(root, "artifacts"))
+			parent := filepath.Join(root, "active")
+			prepare(t, parent)
+			if _, err := NewStore(filepath.Join(parent, "cpa"), stages); !errors.Is(err, ErrSelectionInvalid) {
+				t.Fatalf("NewStore() error = %v, want %v", err, ErrSelectionInvalid)
+			}
+			if _, err := os.Lstat(filepath.Join(parent, "cpa")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("untrusted parent gained selection root: %v", err)
+			}
+		})
+	}
+}
+
 func TestSelectionCommitClassifiesPrePublishAndPostPublishAmbiguity(t *testing.T) {
 	root := t.TempDir()
 	stageRoot := filepath.Join(root, "artifacts")

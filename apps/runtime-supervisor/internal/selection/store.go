@@ -93,7 +93,21 @@ func newStore(
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolve selection root: %v", ErrSelectionInvalid, err)
 	}
-	if err := os.MkdirAll(absolute, 0o700); err != nil {
+	parent := filepath.Dir(absolute)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: create selection parent: %v", ErrSelectionInvalid, err)
+	}
+	parentInfo, err := os.Lstat(parent)
+	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: selection parent is not a directory", ErrSelectionInvalid)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(parentInfo); err != nil {
+		return nil, fmt.Errorf("%w: selection parent: %w", ErrSelectionInvalid, err)
+	}
+	if parentInfo.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("%w: selection parent grants group or other write access", ErrSelectionInvalid)
+	}
+	if err := os.Mkdir(absolute, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, fmt.Errorf("%w: create selection root: %v", ErrSelectionInvalid, err)
 	}
 	rootInfo, err := os.Lstat(absolute)

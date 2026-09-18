@@ -248,17 +248,17 @@ wait_recovery_replacement() {
   return 1
 }
 
-assert_persisted_owner_fails_closed() {
+assert_runtime_bootstrap_fails_closed() {
   local expected_log="$1"
   local count=0
   "${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null 2>&1 || true
   while [ "${count}" -lt 30 ]; do
     if runtime_cpa_pid >/dev/null 2>&1; then
-      fail "untrusted persisted owner started CPA"
+      fail "untrusted persisted state started CPA"
     fi
     if "${compose[@]}" logs --no-color --tail 100 cpamp-runtime 2>&1 | grep -Fq "${expected_log}"; then
       if runtime_get /v1/runtime/status >/dev/null 2>&1; then
-        fail "untrusted persisted owner left Runtime Supervisor reachable"
+        fail "untrusted persisted state left Runtime Supervisor reachable"
       fi
       return 0
     fi
@@ -266,7 +266,7 @@ assert_persisted_owner_fails_closed() {
     sleep 1
   done
   "${compose[@]}" logs --no-color --tail 100 cpamp-runtime >&2 || true
-  fail "untrusted persisted owner did not produce expected failure: ${expected_log}"
+  fail "untrusted persisted state did not produce expected failure: ${expected_log}"
 }
 
 repair_persisted_owner_and_restart() {
@@ -365,12 +365,44 @@ assert_mount_isolation
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
 "${compose[@]}" exec -T cpamp-runtime chown 10001:10001 /runtime/supervisor/active/cpa/selection.json
-assert_persisted_owner_fails_closed "selection file: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
+assert_runtime_bootstrap_fails_closed "selection file: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
 repair_persisted_owner_and_restart /runtime/supervisor/active/cpa/selection.json
 
 "${compose[@]}" exec -T cpamp-runtime chown 10001:10001 /runtime/supervisor/operations.sqlite
-assert_persisted_owner_fails_closed "journal file: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
+assert_runtime_bootstrap_fails_closed "journal file: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
 repair_persisted_owner_and_restart /runtime/supervisor/operations.sqlite
+
+"${compose[@]}" exec -T cpamp-runtime chown 10001:10001 /runtime/supervisor/active
+assert_runtime_bootstrap_fails_closed "selection parent: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
+repair_persisted_owner_and_restart /runtime/supervisor/active
+
+gateway_symlink_target=/runtime/supervisor/.runtime18-gateway-symlink-target
+"${compose[@]}" exec -T cpamp-runtime sh -ec '
+  mkdir "$1"
+  chown root:root "$1"
+  chmod 750 "$1"
+' sh "${gateway_symlink_target}"
+gateway_symlink_target_before="$("${compose[@]}" exec -T cpamp-runtime stat -c '%u:%g:%a' "${gateway_symlink_target}")"
+"${compose[@]}" exec -T --user 10001:10001 cpamp-runtime sh -ec '
+  rmdir /runtime/gateway/auth
+  ln -s "$1" /runtime/gateway/auth
+' sh "${gateway_symlink_target}"
+assert_runtime_bootstrap_fails_closed "Gateway state path is not a real directory: /runtime/gateway/auth"
+"${compose[@]}" stop cpamp-runtime >/dev/null 2>&1 || true
+gateway_symlink_target_after="$("${compose[@]}" run --rm --no-deps --entrypoint sh cpamp-runtime -ec '
+  stat -c "%u:%g:%a" "$1"
+' sh "${gateway_symlink_target}")"
+[ "${gateway_symlink_target_after}" = "${gateway_symlink_target_before}" ] ||
+  fail "Gateway symlink target changed from ${gateway_symlink_target_before} to ${gateway_symlink_target_after}"
+"${compose[@]}" run --rm --no-deps --entrypoint sh cpamp-runtime -ec '
+  test -L /runtime/gateway/auth
+  rm /runtime/gateway/auth
+  mkdir /runtime/gateway/auth
+  chown 10001:10001 /runtime/gateway/auth
+  chmod 700 /runtime/gateway/auth
+' >/dev/null
+"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+wait_ready "${artifact_b}" >/dev/null || fail "Runtime did not recover after repairing Gateway auth directory"
 
 "${compose[@]}" exec -T cpamp-runtime sh -ec '
   chown -R 10001:10001 /runtime/supervisor/artifacts/cpa/7.3.4
@@ -378,6 +410,6 @@ repair_persisted_owner_and_restart /runtime/supervisor/operations.sqlite
   test "$(stat -c %a /runtime/supervisor/artifacts/cpa/7.3.4/cli-proxy-api)" = 755
   test "$(stat -c %a /runtime/supervisor/artifacts/cpa/7.3.4/artifact.json)" = 444
 '
-assert_persisted_owner_fails_closed "finalized stage directory: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
+assert_runtime_bootstrap_fails_closed "finalized stage directory: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
 
 echo "Runtime18 secret/state E2E passed: CPA=10001:10001 A=${artifact_a} B=${artifact_b} D=${artifact_d} rollback=${failure_code}"
