@@ -10,7 +10,10 @@ import (
 	"reflect"
 )
 
-var ErrUntrustedOwner = errors.New("persisted state owner is not the Supervisor")
+var (
+	ErrUntrustedOwner       = errors.New("persisted state owner is not the Supervisor")
+	ErrUntrustedPermissions = errors.New("persisted directory grants group or other write access")
+)
 
 // RequireCurrentProcessOwner rejects persisted state that is not owned by the
 // effective Supervisor identity. Windows has no numeric effective UID and does
@@ -31,6 +34,23 @@ func RequireCurrentProcessOwner(info fs.FileInfo) error {
 			ownerUID,
 			effectiveUID,
 		)
+	}
+	return nil
+}
+
+// RequirePrivateDirectoryPermissions rejects persisted directories writable by
+// identities other than the Supervisor on platforms with POSIX permission
+// semantics. Windows reports synthesized Unix permission bits, so they cannot
+// be used as filesystem authority there.
+func RequirePrivateDirectoryPermissions(info fs.FileInfo) error {
+	if os.Geteuid() < 0 {
+		return nil
+	}
+	if info == nil {
+		return fmt.Errorf("%w: file info is unavailable", ErrUntrustedPermissions)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w: mode %04o", ErrUntrustedPermissions, info.Mode().Perm())
 	}
 	return nil
 }

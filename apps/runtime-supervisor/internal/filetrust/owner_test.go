@@ -47,8 +47,43 @@ func TestRequireCurrentProcessOwnerFailsWhenOwnerIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestRequirePrivateDirectoryPermissions(t *testing.T) {
+	if os.Geteuid() < 0 {
+		if err := RequirePrivateDirectoryPermissions(permissionTestInfo{mode: 0o777}); err != nil {
+			t.Fatalf("platform-native writable directory rejected: %v", err)
+		}
+		return
+	}
+
+	for name, test := range map[string]struct {
+		mode    fs.FileMode
+		wantErr bool
+	}{
+		"private":        {mode: 0o700},
+		"group writable": {mode: 0o720, wantErr: true},
+		"other writable": {mode: 0o702, wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := RequirePrivateDirectoryPermissions(permissionTestInfo{mode: test.mode})
+			if test.wantErr && !errors.Is(err, ErrUntrustedPermissions) {
+				t.Fatalf("error = %v, want %v", err, ErrUntrustedPermissions)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("private directory rejected: %v", err)
+			}
+		})
+	}
+}
+
 type missingOwnerInfo struct {
 	ownerTestInfo
 }
 
 func (missingOwnerInfo) Sys() any { return &struct{ Gid uint32 }{} }
+
+type permissionTestInfo struct {
+	ownerTestInfo
+	mode fs.FileMode
+}
+
+func (info permissionTestInfo) Mode() fs.FileMode { return info.mode }

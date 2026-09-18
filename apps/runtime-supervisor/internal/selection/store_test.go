@@ -135,6 +135,18 @@ func TestSelectionStoreRejectsUntrustedParentShape(t *testing.T) {
 	}
 }
 
+func TestSelectionStoreAcceptsPlatformNativeDirectoryPermissions(t *testing.T) {
+	root := t.TempDir()
+	stages := newStageStore(t, filepath.Join(root, "artifacts"))
+	parent := filepath.Join(root, "active")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(filepath.Join(parent, "cpa"), stages); err != nil {
+		t.Fatalf("NewStore() rejected platform-native directory permissions: %v", err)
+	}
+}
+
 func TestSelectionCommitClassifiesPrePublishAndPostPublishAmbiguity(t *testing.T) {
 	root := t.TempDir()
 	stageRoot := filepath.Join(root, "artifacts")

@@ -104,8 +104,8 @@ func newStore(
 	if err := filetrust.RequireCurrentProcessOwner(parentInfo); err != nil {
 		return nil, fmt.Errorf("%w: selection parent: %w", ErrSelectionInvalid, err)
 	}
-	if parentInfo.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("%w: selection parent grants group or other write access", ErrSelectionInvalid)
+	if err := filetrust.RequirePrivateDirectoryPermissions(parentInfo); err != nil {
+		return nil, fmt.Errorf("%w: selection parent: %w", ErrSelectionInvalid, err)
 	}
 	if err := os.Mkdir(absolute, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, fmt.Errorf("%w: create selection root: %v", ErrSelectionInvalid, err)
