@@ -9,6 +9,7 @@ import (
 	apikeyaliascontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/apikeyalias"
 	automationcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/automation"
 	codexinspectioncontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/codexinspection"
+	cpaupdatecontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/cpaupdate"
 	dashboardcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/dashboard"
 	healthcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/health"
 	managerconfigcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/managerconfig"
@@ -46,8 +47,11 @@ func New(appCtx *app.Context) http.Handler {
 
 	mux := http.NewServeMux()
 	updates := &updatecheckcontroller.Handler{App: appCtx}
+	cpaUpdates := &cpaupdatecontroller.Handler{App: appCtx}
 	mux.HandleFunc("/usage-service/updates", middleware.WithCORS(appCtx.Config, updates.Handle))
 	mux.HandleFunc("/usage-service/updates/", middleware.WithCORS(appCtx.Config, updates.Handle))
+	mux.HandleFunc("/usage-service/runtime/updates", middleware.WithCORS(appCtx.Config, cpaUpdates.Handle))
+	mux.HandleFunc("/usage-service/runtime/updates/", middleware.WithCORS(appCtx.Config, cpaUpdates.Handle))
 	mux.HandleFunc("/health", middleware.WithCORS(appCtx.Config, healthHandler.Health))
 	mux.HandleFunc("/status", middleware.WithCORS(appCtx.Config, systemHandler.Status))
 	mux.HandleFunc("/usage-service/info", middleware.WithCORS(appCtx.Config, systemHandler.Info))

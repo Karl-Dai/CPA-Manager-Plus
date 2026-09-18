@@ -24,11 +24,13 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/runtimeconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/worker"
@@ -156,6 +158,28 @@ func runServer() {
 
 	serverApp := httpapi.New(cfg, db, manager)
 	serverApp.AppContext().DatabaseMaintenance = walMaintenance
+	runtimeMode := model.RuntimeModeExternal
+	var runtimeClient runtimeservice.RuntimeClient
+	if cfg.EmbeddedRuntimeConfigured() {
+		runtimeMode = model.RuntimeModeEmbedded
+		runtimeClient = runtimeservice.NewEmbeddedClientWithTokenSource(
+			cfg.RuntimeURL,
+			runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile),
+		)
+	} else {
+		externalConfig, _, _, resolveErr := serverApp.AppContext().ManagerConfigService.ResolveManagerConfigWithSource(ctx)
+		if resolveErr != nil {
+			log.Printf("resolve External Runtime connection for CPA update status: %v", resolveErr)
+		}
+		baseURL := externalConfig.CPAConnection.CPABaseURL
+		managementKey := externalConfig.CPAConnection.ManagementKey
+		if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(managementKey) == "" {
+			baseURL = cfg.CPAUpstreamURL
+			managementKey = cfg.ManagementKey
+		}
+		runtimeClient = runtimeservice.NewExternalClient(baseURL, managementKey)
+	}
+	serverApp.AppContext().CPAUpdateService = cpaupdateservice.New(db, runtimeClient, runtimeMode)
 	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := serverApp.AppContext().CodexInspectionService.Recover(recoveryCtx); err != nil {
 		log.Printf("recover codex inspection runs: %v", err)
@@ -234,10 +258,6 @@ func runServer() {
 	serverResult := make(chan error, 1)
 	go serveHTTPServer(server, listener, stop, serverResult)
 	if cfg.EmbeddedRuntimeConfigured() {
-		runtimeClient := runtimeservice.NewEmbeddedClientWithTokenSource(
-			cfg.RuntimeURL,
-			runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile),
-		)
 		runtimeReconciler := runtimeservice.NewReconciler(
 			runtimeClient,
 			db,
