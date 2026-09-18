@@ -56,7 +56,10 @@ func (r *repository) LoadAllTx(ctx context.Context, tx *sql.Tx) (map[string]mode
 		var price model.ModelPrice
 		var source, sourceModelID, rawJSON sql.NullString
 		var syncedAt sql.NullInt64
-		var promptConfigured, completionConfigured, cacheReadConfigured, cacheCreationConfigured any
+		// Legacy/non-canonical databases may hold REAL values in these flag
+		// columns; scan as float64 so any numeric value loads while corrupt
+		// non-numeric values keep failing the scan.
+		var promptConfigured, completionConfigured, cacheReadConfigured, cacheCreationConfigured float64
 		if err := rows.Scan(
 			&modelID,
 			&price.Prompt,
@@ -77,10 +80,10 @@ func (r *repository) LoadAllTx(ctx context.Context, tx *sql.Tx) (map[string]mode
 			return nil, err
 		}
 		price.Source = source.String
-		price.PromptConfigured = configuredFlag(promptConfigured)
-		price.CompletionConfigured = configuredFlag(completionConfigured)
-		price.CacheReadConfigured = configuredFlag(cacheReadConfigured)
-		price.CacheCreationConfigured = configuredFlag(cacheCreationConfigured)
+		price.PromptConfigured = promptConfigured != 0
+		price.CompletionConfigured = completionConfigured != 0
+		price.CacheReadConfigured = cacheReadConfigured != 0
+		price.CacheCreationConfigured = cacheCreationConfigured != 0
 		price.SourceModelID = sourceModelID.String
 		price.RawJSON = rawJSON.String
 		if syncedAt.Valid {
@@ -107,7 +110,7 @@ func (r *repository) LoadAllTx(ctx context.Context, tx *sql.Tx) (map[string]mode
 	for tierRows.Next() {
 		var modelID string
 		var tier model.ModelPriceContextTier
-		var promptConfigured, completionConfigured, cacheConfigured, cacheReadConfigured, cacheCreationConfigured any
+		var promptConfigured, completionConfigured, cacheConfigured, cacheReadConfigured, cacheCreationConfigured float64
 		if err := tierRows.Scan(
 			&modelID,
 			&tier.ThresholdTokens,
@@ -124,11 +127,11 @@ func (r *repository) LoadAllTx(ctx context.Context, tx *sql.Tx) (map[string]mode
 		); err != nil {
 			return nil, err
 		}
-		tier.PromptConfigured = configuredFlag(promptConfigured)
-		tier.CompletionConfigured = configuredFlag(completionConfigured)
-		tier.CacheConfigured = configuredFlag(cacheConfigured)
-		tier.CacheReadConfigured = configuredFlag(cacheReadConfigured)
-		tier.CacheCreationConfigured = configuredFlag(cacheCreationConfigured)
+		tier.PromptConfigured = promptConfigured != 0
+		tier.CompletionConfigured = completionConfigured != 0
+		tier.CacheConfigured = cacheConfigured != 0
+		tier.CacheReadConfigured = cacheReadConfigured != 0
+		tier.CacheCreationConfigured = cacheCreationConfigured != 0
 		price, ok := prices[modelID]
 		if !ok {
 			continue
@@ -154,7 +157,7 @@ func (r *repository) LoadAllTx(ctx context.Context, tx *sql.Tx) (map[string]mode
 	for serviceTierRows.Next() {
 		var modelID string
 		var tier model.ModelPriceServiceTier
-		var promptConfigured, completionConfigured, cacheConfigured, cacheReadConfigured, cacheCreationConfigured any
+		var promptConfigured, completionConfigured, cacheConfigured, cacheReadConfigured, cacheCreationConfigured float64
 		if err := serviceTierRows.Scan(
 			&modelID,
 			&tier.Mode,
@@ -172,11 +175,11 @@ func (r *repository) LoadAllTx(ctx context.Context, tx *sql.Tx) (map[string]mode
 		); err != nil {
 			return nil, err
 		}
-		tier.PromptConfigured = configuredFlag(promptConfigured)
-		tier.CompletionConfigured = configuredFlag(completionConfigured)
-		tier.CacheConfigured = configuredFlag(cacheConfigured)
-		tier.CacheReadConfigured = configuredFlag(cacheReadConfigured)
-		tier.CacheCreationConfigured = configuredFlag(cacheCreationConfigured)
+		tier.PromptConfigured = promptConfigured != 0
+		tier.CompletionConfigured = completionConfigured != 0
+		tier.CacheConfigured = cacheConfigured != 0
+		tier.CacheReadConfigured = cacheReadConfigured != 0
+		tier.CacheCreationConfigured = cacheCreationConfigured != 0
 		price, ok := prices[modelID]
 		if !ok {
 			continue
@@ -490,22 +493,4 @@ func nullInt(value *int64) any {
 		return nil
 	}
 	return *value
-}
-
-// configuredFlag reads a *_configured column value as a boolean. Legacy
-// databases may hold real values (e.g. 12.5) in these flag columns due to an
-// earlier sync bug, so accept any nonzero numeric value as configured.
-func configuredFlag(value any) bool {
-	switch typed := value.(type) {
-	case nil:
-		return false
-	case int64:
-		return typed != 0
-	case float64:
-		return typed != 0
-	case bool:
-		return typed
-	default:
-		return false
-	}
 }
