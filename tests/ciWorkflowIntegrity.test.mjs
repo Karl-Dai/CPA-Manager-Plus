@@ -96,6 +96,7 @@ describe('GitHub Actions workflow integrity', () => {
     const workflow = readWorkflow('pr-check.yml');
     const scopeJob = jobBlock(workflow, 'changes');
     const supervisorJob = jobBlock(workflow, 'runtime-supervisor');
+    const supervisorWindowsJob = jobBlock(workflow, 'runtime-supervisor-windows');
     const requiredJob = jobBlock(workflow, 'required');
 
     expect(scopeJob).toContain(
@@ -115,26 +116,46 @@ describe('GitHub Actions workflow integrity', () => {
       'run: go test ./bin/ci/runtime-boundary/main.go ./bin/ci/runtime-boundary/main_test.go'
     );
     expect(supervisorJob).toContain('run: go run ./bin/ci/runtime-boundary/main.go');
+    expect(supervisorWindowsJob).toContain('name: Runtime Supervisor (Windows)');
+    expect(supervisorWindowsJob).toContain(
+      "if: needs.changes.outputs.runtime_supervisor == 'true'"
+    );
+    expect(supervisorWindowsJob).toContain('runs-on: windows-latest');
+    expect(supervisorWindowsJob).toContain('working-directory: apps/runtime-supervisor');
+    expect(supervisorWindowsJob).toContain(
+      "go test ./internal/selection -run '^TestSelectionStoreAcceptsPlatformNativeDirectoryPermissions$' -count=1"
+    );
     expect(requiredJob).toContain('- runtime-supervisor');
+    expect(requiredJob).toContain('- runtime-supervisor-windows');
     expect(requiredJob).toContain(
       "RUNTIME_SUPERVISOR_RESULT: ${{ needs['runtime-supervisor'].result }}"
     );
+    expect(requiredJob).toContain(
+      "RUNTIME_SUPERVISOR_WINDOWS_RESULT: ${{ needs['runtime-supervisor-windows'].result }}"
+    );
     expect(requiredJob).toContain('"Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"');
+    expect(requiredJob).toContain(
+      '"Runtime Supervisor (Windows):${RUNTIME_SUPERVISOR_WINDOWS_RESULT}"'
+    );
   });
 
-  it('runs Runtime14 and Runtime17 E2E after the focused Docker smoke', () => {
+  it('runs Runtime14, Runtime17, and Runtime18 E2E after the focused Docker smoke', () => {
     const dockerJob = jobBlock(readWorkflow('pr-check.yml'), 'docker-build');
     const focusedSmoke = dockerJob.indexOf('run: bin/ci/runtime12-docker-smoke.sh');
     const failureE2E = dockerJob.indexOf('run: bin/ci/runtime14-failure-e2e.sh');
     const activationE2E = dockerJob.indexOf('run: bin/ci/runtime17-activation-e2e.sh');
+    const segmentationE2E = dockerJob.indexOf('run: bin/ci/runtime18-secret-state-e2e.sh');
 
     expect(focusedSmoke).toBeGreaterThan(-1);
     expect(failureE2E).toBeGreaterThan(focusedSmoke);
     expect(activationE2E).toBeGreaterThan(failureE2E);
+    expect(segmentationE2E).toBeGreaterThan(activationE2E);
     expect(dockerJob).toContain("CPAMP_RUNTIME14_PORT: '18317'");
     expect(dockerJob).toContain("CPAMP_RUNTIME14_SKIP_BUILD: 'true'");
     expect(dockerJob).toContain("CPAMP_RUNTIME17_PORT: '18317'");
     expect(dockerJob).toContain("CPAMP_RUNTIME17_SKIP_BUILD: 'true'");
+    expect(dockerJob).toContain("CPAMP_RUNTIME18_PORT: '18317'");
+    expect(dockerJob).toContain("CPAMP_RUNTIME18_SKIP_BUILD: 'true'");
   });
 
   it('keeps Manager Runtime race, vet, and Windows portability gates', () => {
@@ -152,24 +173,29 @@ describe('GitHub Actions workflow integrity', () => {
     expect(windowsJob).toContain('run: go build ./cmd/cpa-manager-plus');
   });
 
-  it('fails Required checks when Supervisor validation fails or is cancelled', () => {
+  it('fails Required checks when Linux or Windows Supervisor validation fails', () => {
     const requiredJob = jobBlock(readWorkflow('pr-check.yml'), 'required');
     const script = requiredJob.split('        run: |\n')[1].replace(/^ {10}/gm, '');
     const successResults = Object.fromEntries(
       [...requiredJob.matchAll(/^\s+([A-Z_]+_RESULT):/gm)].map(([, name]) => [name, 'success'])
     );
 
-    for (const result of ['success', 'skipped', 'failure', 'cancelled']) {
-      const execution = spawnSync('bash', ['-c', script], {
-        encoding: 'utf8',
-        env: { ...process.env, ...successResults, RUNTIME_SUPERVISOR_RESULT: result },
-      });
-      expect(execution.error).toBeUndefined();
-      expect(execution.status).toBe(['success', 'skipped'].includes(result) ? 0 : 1);
-      if (['failure', 'cancelled'].includes(result)) {
-        expect(execution.stderr).toContain(
-          `Runtime Supervisor did not complete successfully: ${result}`
-        );
+    for (const [resultName, checkName] of [
+      ['RUNTIME_SUPERVISOR_RESULT', 'Runtime Supervisor'],
+      ['RUNTIME_SUPERVISOR_WINDOWS_RESULT', 'Runtime Supervisor (Windows)'],
+    ]) {
+      for (const result of ['success', 'skipped', 'failure', 'cancelled']) {
+        const execution = spawnSync('bash', ['-c', script], {
+          encoding: 'utf8',
+          env: { ...process.env, ...successResults, [resultName]: result },
+        });
+        expect(execution.error).toBeUndefined();
+        expect(execution.status).toBe(['success', 'skipped'].includes(result) ? 0 : 1);
+        if (['failure', 'cancelled'].includes(result)) {
+          expect(execution.stderr).toContain(
+            `${checkName} did not complete successfully: ${result}`
+          );
+        }
       }
     }
   });

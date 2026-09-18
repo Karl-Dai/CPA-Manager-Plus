@@ -79,6 +79,42 @@ func TestLoadConfigRejectsInvalidRequiredValues(t *testing.T) {
 	}
 }
 
+func TestLoadConfigParsesPairedNonRootCPAIdentity(t *testing.T) {
+	values := validConfigValues()
+	values["CPAMP_RUNTIME_CPA_UID"] = "10001"
+	values["CPAMP_RUNTIME_CPA_GID"] = "10002"
+	cfg, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.cpaIdentity == nil || *cfg.cpaIdentity != (cpaprocess.ChildIdentity{UID: 10001, GID: 10002}) {
+		t.Fatalf("CPA identity = %+v", cfg.cpaIdentity)
+	}
+}
+
+func TestLoadConfigRejectsIncompleteRootOrMalformedCPAIdentity(t *testing.T) {
+	for _, test := range []struct {
+		uid  string
+		gid  string
+		want string
+	}{
+		{uid: "10001", want: "configured together"},
+		{gid: "10001", want: "configured together"},
+		{uid: "0", gid: "10001", want: "UID must be a non-zero uint32"},
+		{uid: "10001", gid: "0", want: "GID must be a non-zero uint32"},
+		{uid: "root", gid: "10001", want: "UID must be a non-zero uint32"},
+		{uid: "10001", gid: "-1", want: "GID must be a non-zero uint32"},
+	} {
+		values := validConfigValues()
+		values["CPAMP_RUNTIME_CPA_UID"] = test.uid
+		values["CPAMP_RUNTIME_CPA_GID"] = test.gid
+		_, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(1))
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("loadConfig(uid=%q gid=%q) error = %v, want %q", test.uid, test.gid, err, test.want)
+		}
+	}
+}
+
 func TestLoadConfigResamplesZeroGeneration(t *testing.T) {
 	values := validConfigValues()
 	generations := []uint64{0, 42}

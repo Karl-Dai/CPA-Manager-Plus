@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/filetrust"
 )
 
 const (
@@ -111,10 +112,25 @@ func (p *Preparer) Stage(ctx context.Context, release Release) (Metadata, error)
 
 // Store owns immutable finalized stages beneath one private persistent root.
 type Store struct {
-	root string
+	root         string
+	executionGID *uint32
 }
 
 func NewStore(root string) (*Store, error) {
+	return newStore(root, nil)
+}
+
+// NewStoreWithExecutionGroup exposes only search access to finalized version
+// directories for the dedicated CPA group. Temporary staging workspaces and
+// the staging root remain non-enumerable to that group.
+func NewStoreWithExecutionGroup(root string, gid uint32) (*Store, error) {
+	if gid == 0 {
+		return nil, fmt.Errorf("%w: execution group must be non-zero", ErrStaging)
+	}
+	return newStore(root, &gid)
+}
+
+func newStore(root string, executionGID *uint32) (*Store, error) {
 	if strings.TrimSpace(root) == "" || strings.ContainsRune(root, '\x00') {
 		return nil, fmt.Errorf("%w: staging root is required", ErrStaging)
 	}
@@ -125,11 +141,28 @@ func NewStore(root string) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: create staging root: %v", ErrStaging, err)
 	}
-	if err := os.Chmod(absolute, 0o700); err != nil {
+	rootInfo, err := os.Lstat(absolute)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: staging root is not a directory", ErrStaging)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(rootInfo); err != nil {
+		return nil, fmt.Errorf("%w: staging root: %w", ErrStaging, err)
+	}
+	rootMode := os.FileMode(0o700)
+	if executionGID != nil {
+		rootMode = 0o710
+		if err := os.Chown(absolute, -1, int(*executionGID)); err != nil {
+			return nil, fmt.Errorf("%w: assign staging execution group: %v", ErrStaging, err)
+		}
+	}
+	if err := os.Chmod(absolute, rootMode); err != nil {
 		return nil, fmt.Errorf("%w: restrict staging root: %v", ErrStaging, err)
 	}
-	store := &Store{root: absolute}
+	store := &Store{root: absolute, executionGID: executionGID}
 	if err := store.cleanupTemporary(); err != nil {
+		return nil, err
+	}
+	if err := store.reconcileFinalizedExecutionCorridor(); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -145,7 +178,7 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 		return Metadata{}, fmt.Errorf("%w: invalid stage request", ErrStaging)
 	}
 	finalPath := filepath.Join(s.root, release.Version)
-	if metadata, found, err := s.verifyFinal(finalPath, release); found || err != nil {
+	if metadata, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
 		return metadata, err
 	}
 	temporary, err := os.MkdirTemp(s.root, temporaryPrefix)
@@ -190,14 +223,17 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 	if err := syncDirectory(publication); err != nil {
 		return Metadata{}, fmt.Errorf("%w: sync publication directory: %v", ErrStaging, err)
 	}
-	if _, found, err := s.verifyFinal(finalPath, release); found || err != nil {
+	if _, found, err := s.verifyPreparedFinal(finalPath, release); found || err != nil {
 		return Metadata{}, err
 	}
 	if err := os.Rename(publication, finalPath); err != nil {
-		if existing, found, verifyErr := s.verifyFinal(finalPath, release); found || verifyErr != nil {
+		if existing, found, verifyErr := s.verifyPreparedFinal(finalPath, release); found || verifyErr != nil {
 			return existing, verifyErr
 		}
 		return Metadata{}, fmt.Errorf("%w: atomically publish finalized stage: %v", ErrStaging, err)
+	}
+	if err := s.prepareFinalizedExecutionDirectory(finalPath); err != nil {
+		return Metadata{}, err
 	}
 	if err := syncDirectory(s.root); err != nil {
 		return Metadata{}, fmt.Errorf("%w: sync staging root: %v", ErrStaging, err)
@@ -210,6 +246,50 @@ func (s *Store) Stage(ctx context.Context, release Release, download downloadArc
 		return Metadata{}, err
 	}
 	return verified, nil
+}
+
+func (s *Store) reconcileFinalizedExecutionCorridor() error {
+	if s.executionGID == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return fmt.Errorf("%w: inspect finalized stages for execution corridor: %v", ErrStaging, err)
+	}
+	for _, entry := range entries {
+		if ValidateVersion(entry.Name()) != nil {
+			continue
+		}
+		finalPath := filepath.Join(s.root, entry.Name())
+		if _, found, verifyErr := s.verifyFinalizedPath(finalPath, entry.Name()); verifyErr != nil || !found {
+			if errors.Is(verifyErr, filetrust.ErrUntrustedOwner) {
+				return verifyErr
+			}
+			// Do not widen an invalid or incomplete persisted shape. A selected or
+			// requested stage still fails closed through the existing verifier.
+			continue
+		}
+		if err := s.prepareFinalizedExecutionDirectory(finalPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) prepareFinalizedExecutionDirectory(name string) error {
+	if s.executionGID == nil {
+		return nil
+	}
+	if err := os.Chown(name, -1, int(*s.executionGID)); err != nil {
+		return fmt.Errorf("%w: assign finalized execution group: %v", ErrStaging, err)
+	}
+	if err := os.Chmod(name, 0o510); err != nil {
+		return fmt.Errorf("%w: restrict finalized execution directory: %v", ErrStaging, err)
+	}
+	if err := syncDirectory(name); err != nil {
+		return fmt.Errorf("%w: sync finalized execution directory: %v", ErrStaging, err)
+	}
+	return nil
 }
 
 func (s *Store) cleanupTemporary() error {
@@ -260,6 +340,17 @@ func (s *Store) verifyFinal(finalPath string, release Release) (Metadata, bool, 
 	return metadata, true, nil
 }
 
+func (s *Store) verifyPreparedFinal(finalPath string, release Release) (Metadata, bool, error) {
+	metadata, found, err := s.verifyFinal(finalPath, release)
+	if err != nil || !found {
+		return metadata, found, err
+	}
+	if err := s.prepareFinalizedExecutionDirectory(finalPath); err != nil {
+		return Metadata{}, true, err
+	}
+	return metadata, true, nil
+}
+
 func (s *Store) verifyFinalizedPath(finalPath, version string) (Metadata, bool, error) {
 	info, err := os.Lstat(finalPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -268,7 +359,18 @@ func (s *Store) verifyFinalizedPath(finalPath, version string) (Metadata, bool, 
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return Metadata{}, true, fmt.Errorf("%w: finalized stage is not a directory", ErrStageConflict)
 	}
-	metadata, err := readMetadata(filepath.Join(finalPath, stagedMetadataName))
+	if err := filetrust.RequireCurrentProcessOwner(info); err != nil {
+		return Metadata{}, true, fmt.Errorf("%w: finalized stage directory: %w", ErrStageConflict, err)
+	}
+	metadataPath := filepath.Join(finalPath, stagedMetadataName)
+	metadataInfo, err := os.Lstat(metadataPath)
+	if err != nil || !metadataInfo.Mode().IsRegular() || metadataInfo.Mode().Perm() != 0o444 {
+		return Metadata{}, true, fmt.Errorf("%w: finalized metadata permissions differ", ErrStageConflict)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(metadataInfo); err != nil {
+		return Metadata{}, true, fmt.Errorf("%w: finalized metadata: %w", ErrStageConflict, err)
+	}
+	metadata, err := readMetadata(metadataPath)
 	if err != nil || metadata.Version != version {
 		return Metadata{}, true, fmt.Errorf("%w: finalized metadata differs", ErrStageConflict)
 	}
@@ -277,13 +379,12 @@ func (s *Store) verifyFinalizedPath(finalPath, version string) (Metadata, bool, 
 	if err != nil || !executableInfo.Mode().IsRegular() || executableInfo.Mode().Perm() != 0o755 {
 		return Metadata{}, true, fmt.Errorf("%w: finalized executable type or permissions differ", ErrStageConflict)
 	}
+	if err := filetrust.RequireCurrentProcessOwner(executableInfo); err != nil {
+		return Metadata{}, true, fmt.Errorf("%w: finalized executable: %w", ErrStageConflict, err)
+	}
 	actual, err := digestFile(executablePath, maxExtractedBinaryBytes)
 	if err != nil || actual != metadata.ArtifactID {
 		return Metadata{}, true, fmt.Errorf("%w: finalized executable digest differs", ErrStageConflict)
-	}
-	metadataInfo, err := os.Lstat(filepath.Join(finalPath, stagedMetadataName))
-	if err != nil || !metadataInfo.Mode().IsRegular() || metadataInfo.Mode().Perm() != 0o444 {
-		return Metadata{}, true, fmt.Errorf("%w: finalized metadata permissions differ", ErrStageConflict)
 	}
 	return metadata, true, nil
 }

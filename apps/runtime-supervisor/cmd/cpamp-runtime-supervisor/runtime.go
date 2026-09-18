@@ -59,7 +59,13 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 	if cfg.journalPath != "" {
 		supervisorRoot := filepath.Dir(cfg.journalPath)
 		stageRoot := filepath.Join(supervisorRoot, "artifacts", "cpa")
-		stageStore, err := runtimeupdate.NewStore(stageRoot)
+		var stageStore *runtimeupdate.Store
+		var err error
+		if cfg.cpaIdentity == nil {
+			stageStore, err = runtimeupdate.NewStore(stageRoot)
+		} else {
+			stageStore, err = runtimeupdate.NewStoreWithExecutionGroup(stageRoot, cfg.cpaIdentity.GID)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("configure trusted stage storage: %w", err)
 		}
@@ -94,6 +100,12 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 			log.Printf("active Gateway artifact metadata is incomplete: %v", initialRefreshErr)
 		}
 		child := cpaprocess.NewManager(refreshArtifact)
+		if cfg.cpaIdentity != nil {
+			child, err = cpaprocess.NewManagerWithIdentity(refreshArtifact, *cfg.cpaIdentity)
+			if err != nil {
+				return nil, fmt.Errorf("configure CPA child identity: %w", err)
+			}
+		}
 		observer, err := readiness.New(child, cfg.cpaAddr)
 		if err != nil {
 			return nil, err

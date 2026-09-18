@@ -203,6 +203,7 @@ describe('PR check classifier', () => {
       'bin/ci/runtime12-docker-smoke.sh',
       'bin/ci/runtime14-failure-e2e.sh',
       'bin/ci/runtime17-activation-e2e.sh',
+      'bin/ci/runtime18-secret-state-e2e.sh',
       'bin/ci/validate-runtime12-compose.mjs',
     ]) {
       expect(classifyChangedFiles([filePath])).toEqual({
@@ -231,6 +232,7 @@ describe('PR check classifier', () => {
       'bin/ci/runtime12-docker-smoke.sh',
       'bin/ci/runtime14-failure-e2e.sh',
       'bin/ci/runtime17-activation-e2e.sh',
+      'bin/ci/runtime18-secret-state-e2e.sh',
     ]) {
       expect(classifyChangedFiles([filePath]).docker, filePath).toBe(true);
     }

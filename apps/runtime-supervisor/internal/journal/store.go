@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/filetrust"
 	modernsqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -82,6 +83,18 @@ func Open(ctx context.Context, path string, options Options) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o700); err != nil {
 		return nil, fmt.Errorf("create journal directory: %w", err)
 	}
+	directoryInfo, err := os.Lstat(filepath.Dir(absolutePath))
+	if err != nil || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("journal directory is not a directory")
+	}
+	if err := filetrust.RequireCurrentProcessOwner(directoryInfo); err != nil {
+		return nil, fmt.Errorf("journal directory: %w", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if err := validateExistingDatabaseFile(absolutePath+suffix, "journal sidecar"); err != nil {
+			return nil, err
+		}
+	}
 	if err := prepareDatabaseFile(absolutePath); err != nil {
 		return nil, err
 	}
@@ -102,9 +115,36 @@ func Open(ctx context.Context, path string, options Options) (*Store, error) {
 // prepareDatabaseFile establishes private permissions before SQLite can create
 // WAL or shared-memory sidecars from the main database file's mode.
 func prepareDatabaseFile(path string) error {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	info, err := os.Lstat(path)
+	existed := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect journal file: %w", err)
+	}
+	if existed {
+		if err := validateDatabaseFileInfo(info, "journal file"); err != nil {
+			return err
+		}
+	}
+	flags := os.O_RDWR
+	if !existed {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	file, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
 		return fmt.Errorf("prepare journal file: %w", err)
+	}
+	openedInfo, statErr := file.Stat()
+	if statErr != nil {
+		_ = file.Close()
+		return fmt.Errorf("inspect prepared journal file: %w", statErr)
+	}
+	if err := validateDatabaseFileInfo(openedInfo, "journal file"); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if existed && !os.SameFile(info, openedInfo) {
+		_ = file.Close()
+		return errors.New("journal file changed while opening")
 	}
 	if err := file.Chmod(0o600); err != nil {
 		_ = file.Close()
@@ -112,6 +152,27 @@ func prepareDatabaseFile(path string) error {
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close prepared journal file: %w", err)
+	}
+	return nil
+}
+
+func validateExistingDatabaseFile(path, label string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", label, err)
+	}
+	return validateDatabaseFileInfo(info, label)
+}
+
+func validateDatabaseFileInfo(info os.FileInfo, label string) error {
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a regular file", label)
+	}
+	if err := filetrust.RequireCurrentProcessOwner(info); err != nil {
+		return fmt.Errorf("%s: %w", label, err)
 	}
 	return nil
 }

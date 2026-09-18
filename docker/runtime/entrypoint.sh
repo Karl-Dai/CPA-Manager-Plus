@@ -5,11 +5,77 @@ runtime_root="/runtime"
 supervisor_dir="${runtime_root}/supervisor"
 gateway_dir="${runtime_root}/gateway"
 token_file="${CPAMP_RUNTIME_TOKEN_FILE:-/run/cpamp/runtime-secret/token}"
+cpa_uid="${CPAMP_RUNTIME_CPA_UID:-}"
+cpa_gid="${CPAMP_RUNTIME_CPA_GID:-}"
 seed_file="/usr/local/share/cpamp/runtime/config.seed.yaml"
 gateway_config="${gateway_dir}/config.yaml"
 
-mkdir -p "$supervisor_dir" "$gateway_dir/auth" "$gateway_dir/logs" "$gateway_dir/plugins" "$(dirname "$token_file")"
-chmod 0700 "$supervisor_dir" "$gateway_dir" "$(dirname "$token_file")"
+case "${cpa_uid}:${cpa_gid}" in
+  *[!0-9:]*|:*|*:) echo "Runtime CPA UID/GID must be positive decimal integers" >&2; exit 1 ;;
+esac
+if [ "$cpa_uid" -eq 0 ] || [ "$cpa_gid" -eq 0 ] ||
+  [ "$(id -u cpamp-cpa)" != "$cpa_uid" ] || [ "$(id -g cpamp-cpa)" != "$cpa_gid" ]; then
+  echo "Runtime CPA UID/GID does not match the image-owned cpamp-cpa identity" >&2
+  exit 1
+fi
+
+token_dir="$(dirname "$token_file")"
+artifact_root="${supervisor_dir}/artifacts"
+artifact_cpa_root="${artifact_root}/cpa"
+
+require_root_owned_directory() {
+  trusted_directory="$1"
+  if [ ! -d "$trusted_directory" ] || [ -L "$trusted_directory" ]; then
+    echo "Supervisor persisted directory is not a trusted directory: ${trusted_directory}" >&2
+    exit 1
+  fi
+  trusted_owner="$(stat -c '%u' "$trusted_directory")"
+  if [ "$trusted_owner" != 0 ]; then
+    echo "Supervisor persisted directory owner is not root: ${trusted_directory} (uid ${trusted_owner})" >&2
+    exit 1
+  fi
+}
+
+ensure_root_owned_directory() {
+  trusted_directory="$1"
+  if [ -e "$trusted_directory" ] || [ -L "$trusted_directory" ]; then
+    require_root_owned_directory "$trusted_directory"
+    return
+  fi
+  mkdir "$trusted_directory"
+  require_root_owned_directory "$trusted_directory"
+}
+
+ensure_real_directory() {
+  state_directory="$1"
+  if [ -e "$state_directory" ] || [ -L "$state_directory" ]; then
+    if [ ! -d "$state_directory" ] || [ -L "$state_directory" ]; then
+      echo "Gateway state path is not a real directory: ${state_directory}" >&2
+      exit 1
+    fi
+    return
+  fi
+  mkdir "$state_directory"
+  if [ ! -d "$state_directory" ] || [ -L "$state_directory" ]; then
+    echo "Gateway state path is not a real directory: ${state_directory}" >&2
+    exit 1
+  fi
+}
+
+ensure_root_owned_directory "$runtime_root"
+ensure_root_owned_directory "$supervisor_dir"
+ensure_root_owned_directory "$artifact_root"
+ensure_root_owned_directory "$artifact_cpa_root"
+ensure_real_directory "$gateway_dir"
+ensure_real_directory "$gateway_dir/auth"
+ensure_real_directory "$gateway_dir/logs"
+ensure_real_directory "$gateway_dir/plugins"
+mkdir -p "$token_dir"
+chown root:root "$runtime_root" "$token_dir"
+chmod 0711 "$runtime_root"
+chmod 0700 "$token_dir"
+chown root:"$cpa_gid" "$supervisor_dir" "$artifact_root" "$artifact_cpa_root"
+chmod 0710 "$supervisor_dir" "$artifact_root" "$artifact_cpa_root"
 
 validate_runtime_token() {
   candidate="$1"
@@ -53,6 +119,7 @@ if [ -n "$explicit_token" ] && [ "$runtime_token" != "$explicit_token" ]; then
   exit 1
 fi
 chmod 0600 "$token_file"
+chown root:root "$token_file"
 
 if [ ! -e "$gateway_config" ]; then
   config_tmp="${gateway_config}.tmp.$$"
@@ -67,6 +134,9 @@ if [ ! -e "$gateway_config" ]; then
   rm -f "$config_tmp"
   trap - EXIT HUP INT TERM
 fi
+
+chown -R --no-dereference "$cpa_uid:$cpa_gid" "$gateway_dir"
+chmod 0700 "$gateway_dir" "$gateway_dir/auth" "$gateway_dir/logs" "$gateway_dir/plugins"
 
 export CPAMP_RUNTIME_TOKEN="$runtime_token"
 cd "$gateway_dir"

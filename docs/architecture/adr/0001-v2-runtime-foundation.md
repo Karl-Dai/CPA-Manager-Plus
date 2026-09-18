@@ -347,6 +347,28 @@ Docker Phase 1 has three deployment/container failure domains:
 
 Within `cpamp-runtime`, Runtime Supervisor and CPA remain separate processes with distinct roles, ownership, state, and authority, but they share the Runtime container failure domain. Phase 1 does not guarantee that the CPA child survives Runtime Supervisor PID 1 exit or Runtime container crash, stop, or kill.
 
+Docker Embedded keeps Runtime Supervisor as the privileged execution owner and
+runs every CPA child as the fixed image-owned non-root identity `10001:10001`.
+The credential switch is enforced at the single CPA OS-spawn primitive, so
+Start, Restart, automatic recovery, activation candidates, rollback, and
+post-recreation reconciliation share one fail-closed boundary. A configured
+identity that cannot be applied is a spawn failure and MUST NOT fall back to a
+root CPA process. Native or other deployments without a configured child
+identity retain their existing process behavior.
+
+`/runtime/gateway` is CPA-owned writable Gateway state. Runtime transport
+credentials and Supervisor journal, selection, control, and temporary staging
+state remain Supervisor-owned and unreadable/unwritable to the CPA identity.
+Finalized Runtime16 CPA artifacts remain in the Supervisor artifact store: the
+dedicated CPA group receives only the search permission needed to traverse the
+artifact path and read/execute the immutable finalized binary, without
+directory enumeration or access to sibling private state. Existing persisted
+Runtime16/17 stages and selection are reconciled idempotently to this corridor
+without rewriting their trusted metadata or exact bytes.
+
+Manager retains `/data` plus a read-only Runtime-token mount and no `/runtime`;
+Ingress retains no Manager data, Runtime state, or Runtime-token mount.
+
 Phase 1 does not introduce a separate CPA container, Docker socket orchestration, or another lifecycle sidecar/controller. The Ingress failure domain exists only to provide the unified public L7 transport edge.
 
 #### Native Linux
@@ -528,3 +550,4 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 12. Container/bootstrap startup may create internal transport and seed state, but MUST NOT infer desired running state or start CPA outside a typed durable lifecycle mutation.
 13. Exact active executable SHA-256 is Embedded update-fencing authority; human version metadata is trusted only when CPAMP-owned metadata binds it to that exact digest, and future updater side effects require a Supervisor-enforced expected-active-artifact fence.
 14. Trusted CPA prepare/staging resolves only an exact official release in Supervisor, verifies both source archive and extracted executable identities, persists only an inactive immutable stage in Runtime-owned storage, and grants no activation or rollback authority.
+15. Docker Embedded keeps Supervisor privileged while every CPA child runs as the fixed non-root image identity; Gateway state is CPA-writable, transport credentials and Supervisor private state are CPA-inaccessible, finalized artifacts expose only a non-enumerable execution corridor, and identity setup failure never falls back to root execution.

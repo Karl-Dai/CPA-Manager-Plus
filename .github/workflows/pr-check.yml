@@ -189,6 +189,29 @@ jobs:
       - name: Validate architecture boundary
         run: go run ./bin/ci/runtime-boundary/main.go
 
+  runtime-supervisor-windows:
+    name: Runtime Supervisor (Windows)
+    needs: changes
+    if: needs.changes.outputs.runtime_supervisor == 'true'
+    runs-on: windows-latest
+    env:
+      GOWORK: 'off'
+      GOFLAGS: -mod=readonly
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: apps/runtime-supervisor/go.mod
+
+      - name: Test selection filesystem portability
+        working-directory: apps/runtime-supervisor
+        run: go test ./internal/selection -run '^TestSelectionStoreAcceptsPlatformNativeDirectoryPermissions$' -count=1
+
   ingress:
     name: Ingress
     needs: changes
@@ -386,6 +409,12 @@ jobs:
           CPAMP_RUNTIME17_SKIP_BUILD: 'true'
         run: bin/ci/runtime17-activation-e2e.sh
 
+      - name: Run Runtime secret and state segmentation E2E
+        env:
+          CPAMP_RUNTIME18_PORT: '18317'
+          CPAMP_RUNTIME18_SKIP_BUILD: 'true'
+        run: bin/ci/runtime18-secret-state-e2e.sh
+
   demo-docs:
     name: Demo and Docs
     needs: changes
@@ -460,6 +489,7 @@ jobs:
       - frontend
       - manager-server
       - runtime-supervisor
+      - runtime-supervisor-windows
       - ingress
       - manager-server-windows-sqlite
       - native-control
@@ -476,6 +506,7 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           MANAGER_SERVER_RESULT: ${{ needs['manager-server'].result }}
           RUNTIME_SUPERVISOR_RESULT: ${{ needs['runtime-supervisor'].result }}
+          RUNTIME_SUPERVISOR_WINDOWS_RESULT: ${{ needs['runtime-supervisor-windows'].result }}
           INGRESS_RESULT: ${{ needs.ingress.result }}
           WINDOWS_SQLITE_RESULT: ${{ needs['manager-server-windows-sqlite'].result }}
           NATIVE_CONTROL_RESULT: ${{ needs['native-control'].result }}
@@ -491,6 +522,7 @@ jobs:
             "Frontend:${FRONTEND_RESULT}"
             "Manager Server:${MANAGER_SERVER_RESULT}"
             "Runtime Supervisor:${RUNTIME_SUPERVISOR_RESULT}"
+            "Runtime Supervisor (Windows):${RUNTIME_SUPERVISOR_WINDOWS_RESULT}"
             "Ingress:${INGRESS_RESULT}"
             "Manager Server SQLite (Windows):${WINDOWS_SQLITE_RESULT}"
             "Native Control:${NATIVE_CONTROL_RESULT}"

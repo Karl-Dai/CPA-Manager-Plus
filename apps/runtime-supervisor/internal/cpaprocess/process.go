@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	ErrStateConflict = errors.New("CPA child is already owned")
-	ErrInvalidSpec   = errors.New("invalid CPA start spec")
-	ErrSpawnFailed   = errors.New("CPA child spawn failed")
-	ErrStopFailed    = errors.New("CPA child stop failed")
+	ErrStateConflict   = errors.New("CPA child is already owned")
+	ErrInvalidSpec     = errors.New("invalid CPA start spec")
+	ErrInvalidIdentity = errors.New("invalid CPA child identity")
+	ErrSpawnFailed     = errors.New("CPA child spawn failed")
+	ErrStopFailed      = errors.New("CPA child stop failed")
 )
 
 // StartSpec supplies an executable and literal arguments, never a shell command.
@@ -29,6 +30,21 @@ var (
 type StartSpec struct {
 	Executable string
 	Args       []string
+}
+
+// ChildIdentity is a Supervisor-local OS credential, never Runtime Protocol
+// authority. A zero UID or GID is invalid because configured identity must
+// never permit a root CPA fallback.
+type ChildIdentity struct {
+	UID uint32
+	GID uint32
+}
+
+func (identity ChildIdentity) validate() error {
+	if identity.UID == 0 || identity.GID == 0 {
+		return fmt.Errorf("%w: UID and GID must be non-zero", ErrInvalidIdentity)
+	}
+	return nil
 }
 
 type State string
@@ -68,15 +84,17 @@ const exitEventBuffer = 1
 // Manager owns at most one CPA child. Use one Manager per Supervisor incarnation.
 // Its zero value is ready to use; it must not be copied after first use.
 type Manager struct {
-	mu           sync.Mutex
-	beforeSpawn  func(StartSpec) error
-	cmd          *exec.Cmd
-	waitDone     chan struct{}
-	stopTarget   *exec.Cmd
-	nextInstance uint64
-	observation  Observation
-	exitEvents   chan ExitEvent
-	exitPublish  sync.Mutex
+	mu            sync.Mutex
+	beforeSpawn   func(StartSpec) error
+	childIdentity *ChildIdentity
+	applyIdentity func(*exec.Cmd, ChildIdentity) error
+	cmd           *exec.Cmd
+	waitDone      chan struct{}
+	stopTarget    *exec.Cmd
+	nextInstance  uint64
+	observation   Observation
+	exitEvents    chan ExitEvent
+	exitPublish   sync.Mutex
 }
 
 // NewManager creates one Supervisor-incarnation child owner. beforeSpawn runs
@@ -86,6 +104,16 @@ type Manager struct {
 // or rejected duplicate Start calls touch the filesystem.
 func NewManager(beforeSpawn func(StartSpec) error) *Manager {
 	return &Manager{beforeSpawn: beforeSpawn}
+}
+
+// NewManagerWithIdentity configures the one credential boundary used by every
+// CPA spawn path. The identity is applied to the actual OS command immediately
+// before the existing pre-spawn observation and exec boundary.
+func NewManagerWithIdentity(beforeSpawn func(StartSpec) error, identity ChildIdentity) (*Manager, error) {
+	if err := identity.validate(); err != nil {
+		return nil, err
+	}
+	return &Manager{beforeSpawn: beforeSpawn, childIdentity: &identity}, nil
 }
 
 // StopTarget is an opaque reservation for the exact child owned when Stop was
@@ -131,6 +159,15 @@ func (m *Manager) Start(ctx context.Context, spec StartSpec) (Observation, error
 	}
 	cmd := exec.Command(spec.Executable, spec.Args...)
 	cmd.Env = childEnvironment(os.Environ(), runtime.GOOS == "windows")
+	if m.childIdentity != nil {
+		apply := m.applyIdentity
+		if apply == nil {
+			apply = applyChildIdentity
+		}
+		if err := apply(cmd, *m.childIdentity); err != nil {
+			return m.observeLocked(), fmt.Errorf("%w: configure child credentials: %v", ErrSpawnFailed, err)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return m.observeLocked(), err
 	}

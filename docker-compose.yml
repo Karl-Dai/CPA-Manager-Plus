@@ -62,6 +62,8 @@ services:
       CPAMP_RUNTIME_IDENTITY: 'embedded-default'
       CPAMP_RUNTIME_JOURNAL_PATH: '/runtime/supervisor/operations.sqlite'
       CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:8317'
+      CPAMP_RUNTIME_CPA_UID: '10001'
+      CPAMP_RUNTIME_CPA_GID: '10001'
       CPAMP_CPA_EXECUTABLE: '/usr/local/bin/cli-proxy-api'
       CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'
     volumes:
