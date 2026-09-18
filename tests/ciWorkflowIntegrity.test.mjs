@@ -106,6 +106,15 @@ describe('GitHub Actions workflow integrity', () => {
     expect(supervisorJob).toContain('working-directory: apps/runtime-supervisor');
     expect(supervisorJob).toContain('cache-dependency-path: apps/runtime-supervisor/go.mod');
     expect(supervisorJob).toContain('run: go test ./...');
+    expect(supervisorJob).toContain('name: Test deterministic Runtime prepare and staging');
+    for (const testName of [
+      'TestSourceResolvesOnlyExactOfficialReleaseAsset',
+      'TestSourceBoundsMetadataAndArchiveAndVerifiesDigest',
+      'TestStoreStagesOnlyExactExecutableWithExactIdentity',
+      'TestStoreReusesOnlyVerifiedImmutableFinalStageAcrossReopen',
+    ]) {
+      expect(supervisorJob).toContain(testName);
+    }
     expect(supervisorJob).toContain('run: go vet ./...');
     for (const target of ['linux/amd64', 'linux/arm64', 'windows/amd64']) {
       expect(supervisorJob).toContain(target);
@@ -139,23 +148,31 @@ describe('GitHub Actions workflow integrity', () => {
     );
   });
 
-  it('runs Runtime14, Runtime17, and Runtime18 E2E after the focused Docker smoke', () => {
+  it('runs Runtime14, Runtime17, Runtime18, and Runtime19 E2E in order after the focused Docker smoke', () => {
     const dockerJob = jobBlock(readWorkflow('pr-check.yml'), 'docker-build');
     const focusedSmoke = dockerJob.indexOf('run: bin/ci/runtime12-docker-smoke.sh');
     const failureE2E = dockerJob.indexOf('run: bin/ci/runtime14-failure-e2e.sh');
     const activationE2E = dockerJob.indexOf('run: bin/ci/runtime17-activation-e2e.sh');
     const segmentationE2E = dockerJob.indexOf('run: bin/ci/runtime18-secret-state-e2e.sh');
+    const exitE2E = dockerJob.indexOf('run: bin/ci/runtime19-phase1-exit-e2e.sh');
 
     expect(focusedSmoke).toBeGreaterThan(-1);
     expect(failureE2E).toBeGreaterThan(focusedSmoke);
     expect(activationE2E).toBeGreaterThan(failureE2E);
     expect(segmentationE2E).toBeGreaterThan(activationE2E);
+    expect(exitE2E).toBeGreaterThan(segmentationE2E);
     expect(dockerJob).toContain("CPAMP_RUNTIME14_PORT: '18317'");
     expect(dockerJob).toContain("CPAMP_RUNTIME14_SKIP_BUILD: 'true'");
     expect(dockerJob).toContain("CPAMP_RUNTIME17_PORT: '18317'");
     expect(dockerJob).toContain("CPAMP_RUNTIME17_SKIP_BUILD: 'true'");
     expect(dockerJob).toContain("CPAMP_RUNTIME18_PORT: '18317'");
     expect(dockerJob).toContain("CPAMP_RUNTIME18_SKIP_BUILD: 'true'");
+    expect(dockerJob).toContain("CPAMP_RUNTIME19_PORT: '18317'");
+    expect(dockerJob).toContain("CPAMP_RUNTIME19_SKIP_BUILD: 'true'");
+    expect(dockerJob).not.toContain('continue-on-error');
+    expect(
+      existsSync(path.join(repoRoot, 'bin', 'ci', 'runtime19-phase1-exit-e2e.sh'))
+    ).toBe(true);
   });
 
   it('keeps Manager Runtime race, vet, and Windows portability gates', () => {
@@ -173,7 +190,7 @@ describe('GitHub Actions workflow integrity', () => {
     expect(windowsJob).toContain('run: go build ./cmd/cpa-manager-plus');
   });
 
-  it('fails Required checks when Linux or Windows Supervisor validation fails', () => {
+  it('fails Required checks when required Runtime validation fails or is cancelled', () => {
     const requiredJob = jobBlock(readWorkflow('pr-check.yml'), 'required');
     const script = requiredJob.split('        run: |\n')[1].replace(/^ {10}/gm, '');
     const successResults = Object.fromEntries(
@@ -183,6 +200,7 @@ describe('GitHub Actions workflow integrity', () => {
     for (const [resultName, checkName] of [
       ['RUNTIME_SUPERVISOR_RESULT', 'Runtime Supervisor'],
       ['RUNTIME_SUPERVISOR_WINDOWS_RESULT', 'Runtime Supervisor (Windows)'],
+      ['DOCKER_BUILD_RESULT', 'Docker Build'],
     ]) {
       for (const result of ['success', 'skipped', 'failure', 'cancelled']) {
         const execution = spawnSync('bash', ['-c', script], {
